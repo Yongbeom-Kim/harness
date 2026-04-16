@@ -42,7 +42,7 @@ func TestClaudeCliToolPassesPromptAsDistinctArgument(t *testing.T) {
 	if len(callArgs) != 8 {
 		t.Fatalf("expected 8 argv entries, got %d: %#v", len(callArgs), callArgs)
 	}
-	if callArgs[0] != "-lc" || callArgs[1] != `. "$HOME/.agentrc" && exec "$@"` || callArgs[2] != "bash" {
+	if callArgs[0] != "-lc" || callArgs[1] != `. "$HOME/.agentrc" && "$@"` || callArgs[2] != "bash" {
 		t.Fatalf("unexpected bash wrapper argv: %#v", callArgs[:3])
 	}
 	if callArgs[3] != "claude" || callArgs[4] != "-p" || callArgs[5] != "--session-id" {
