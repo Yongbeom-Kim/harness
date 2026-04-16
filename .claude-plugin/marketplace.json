@@ -1,0 +1,16 @@
+{
+    "name": "yongbeoms-personal-harnesses",
+    "description": "Yongbeom's personal harness",
+    "owner": {
+        "name": "Kim Yongbeom",
+        "email": "dernbu@gmail.com"
+    },
+    "plugins": [
+        {
+            "name": "skills",
+            "description": "Yongbeom's skills.",
+            "version": "1.0.14",
+            "source": "./skills"
+        }
+    ]
+}
