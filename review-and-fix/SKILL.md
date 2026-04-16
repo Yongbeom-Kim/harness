@@ -10,31 +10,31 @@ Dispatch a single reviewer subagent that reviews code changes across correctness
 ## When to Use
 
 - **Standalone:** User invokes `/review-and-fix` directly after making changes
-- **Embedded:** Called from `implement-from-plan` as the final review step (runs in a subagent)
+- **Embedded:** Called from `implement` as the final review step (runs in a subagent)
 
 ## Inputs
 
 | Input | Required | Source |
 |---|---|---|
 | `BASE_SHA` | No | User argument or interactive ask. Diff is always base_sha vs working tree. |
-| `SPEC_FILE_PATH` | No | Passed by `implement-from-plan` |
-| `PLAN_FILE_PATH` | No | Passed by `implement-from-plan` |
+| `SPEC_FILE_PATH` | No | Passed by `implement` |
+| `PLAN_FILE_PATH` | No | Passed by `implement` |
 
-If `BASE_SHA` is not provided as an argument, ask the user interactively:
+If `BASE_SHA` is not provided as an argument, ask the user interactively with the current request-input tool:
 
 ```
-AskUserQuestion(
-  questions=[{
-    question: "What base commit should I diff against?",
+request_user_input({
+  questions: [{
     header: "Base SHA",
+    id: "base_sha_strategy",
+    question: "What base commit should I diff against?",
     options: [
-      { label: "HEAD~1", description: "Compare against the previous commit" },
-      { label: "main/master", description: "Compare against the main branch" },
-      { label: "Merge base", description: "Auto-detect merge base with main branch" }
-    ],
-    multiSelect: false
+      { label: "HEAD~1 (Recommended)", description: "Compare against the previous commit." },
+      { label: "main/master", description: "Compare against the repository's main branch." },
+      { label: "Merge base", description: "Auto-detect the merge base with the main branch." }
+    ]
   }]
-)
+})
 ```
 
 ## Control Flow
@@ -60,7 +60,7 @@ def review_and_fix(base_sha=None, spec_path=None, plan_path=None):
 
 ## Dispatching the Reviewer
 
-Read `./reviewer-prompt.md`, fill in placeholders, and dispatch as a **foreground** Agent tool call (`subagent_type: "general-purpose"`).
+Read `./reviewer-prompt.md`, fill in placeholders, spawn exactly one reviewer subagent, and wait for its final result before continuing.
 
 Placeholders:
 - `[CHANGED_FILES_LIST]`: List of files from `git diff --name-only BASE_SHA`

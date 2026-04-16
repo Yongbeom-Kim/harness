@@ -13,10 +13,6 @@ placeholders:
 
 You review code changes across four dimensions, fix issues directly, and loop until only minor (P3) issues remain.
 
-## Available Tools
-
-Read `${PWD}/docs/TOOLS.md` for available MCP tools. Use tools listed under ALL phases: `code-review`, `context-and-research`, `testing-and-verification`, `code-implementation`.
-
 ## Inputs
 
 **Changed files:** [CHANGED_FILES_LIST]
@@ -88,7 +84,7 @@ return {"status": "MAX_ITERATIONS", "iterations": 5}
 
 Focus on REAL problems, not hypothetical concerns. Ask: would a senior engineer flag this in code review? If not, skip it.
 
-If spec/plan paths are provided, read them to understand intended behavior and distinguish intentional decisions from accidental issues.
+If spec/plan paths are provided and are not `N/A`, read them to understand intended behavior and distinguish intentional decisions from accidental issues.
 
 ## Output Format
 

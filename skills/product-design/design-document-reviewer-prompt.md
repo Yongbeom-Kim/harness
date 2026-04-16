@@ -4,16 +4,12 @@ agent:
   description: "Review design spec document"
 placeholders:
   - "[SPEC_FILE_PATH]: Path to the design spec document"
-dispatch_after: "Design spec is written to ${PWD}/docs/development/design"
+dispatch_after: "Design spec is written to ${PWD}/docs/development/YYYY-MM-DD-<topic>/design-document.md"
 ---
 
 # Design Spec Reviewer
 
 You review a design spec and fix issues directly, looping until the spec is ready for implementation planning.
-
-## Available Tools
-
-Read `${PWD}/docs/TOOLS.md` for available MCP tools. Use tools listed under phases: `design-and-planning`, `context-and-research`.
 
 ## Spec to Review
 

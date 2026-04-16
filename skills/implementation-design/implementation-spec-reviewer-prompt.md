@@ -5,7 +5,7 @@ agent:
 placeholders:
   - "[PLAN_FILE_PATH]: Path to the implementation plan"
   - "[SPEC_FILE_PATH]: Path to the design spec for reference"
-dispatch_after: "Implementation plan is written to ${PWD}/docs/development/plans"
+dispatch_after: "Implementation plan is written to ${PWD}/docs/development/YYYY-MM-DD-<topic>/implementation-spec.md"
 ---
 
 # Implementation Plan Reviewer
@@ -14,7 +14,7 @@ You review an implementation plan against its design spec and fix issues directl
 
 ## Available Tools
 
-Read `${PWD}/docs/TOOLS.md` for available MCP tools. Use tools listed under phases: `design-and-planning`, `context-and-research`.
+Use the repository tools available in the current Codex session for planning, context gathering, and document edits.
 
 ## Inputs
 

@@ -5,7 +5,7 @@ description: "Turn design documents into reviewed implementation specifications 
 
 # Implementation Design
 
-Collaborate with the user to turn a design document + a history of past design decisions into a comprehensive implementation specification, that anyone is able to implement.
+Turn a design document plus its decision log into a comprehensive implementation specification that another engineer can execute without prior project context.
 
 Write comprehensive implementation plans assuming the engineer has zero context for our codebase and questionable taste. Document everything they need to know: which files to touch for each task, code, testing, docs they might need to check, how to test it. Give them the whole plan as bite-sized tasks. DRY. YAGNI. TDD. Frequent commits.
 
@@ -19,11 +19,11 @@ This skill accepts a directory of documents from the `product-design` skill:
 /implementation-design <directory path>
 ```
 
-In the directory, there will be two documents. The first will be a raw log of all design decisions made through dialogue, and the second contains the design document that is the result of said dialogue.
+In the directory, there will be two documents: a raw log of design decisions made through dialogue and the resulting design document.
 
 You are tasked with creating a comprehensive implementation plan from the design document given.
 
-The implementation plan should be in `${PWD}/docs/development/YYYY-MM-DD-<topic>/implementation-spec.md`
+Write the implementation plan to `${PWD}/docs/development/YYYY-MM-DD-<topic>/implementation-spec.md`.
 
 ## Component Breakdown
 
@@ -121,17 +121,13 @@ git commit -m "feat: add specific feature"
 
 ## Review
 
-After writing the implementation spec, read `./implementation-spec-reviewer-prompt.md` and use it as the prompt for a **foreground Agent** (`subagent_type: "general-purpose"`).
+After writing the implementation spec, read `./implementation-spec-reviewer-prompt.md`, spawn a reviewer subagent with that prompt, pass the implementation spec path plus the design spec path, wait for it to finish, apply any requested fixes, and repeat until the reviewer approves.
 
 
 ### Output
 
-After all steps, print a copy-pasteable command for a fresh window and stop:
+After all steps, print a single copy-pasteable command for a fresh window and stop:
 
 ```
-## Ready for Implementation
-
-Copy this into a new conversation to start implementation session:
-
-Invoke the implement skill on the following documents in the directory ${PWD}/docs/development/YYYY-MM-DD-<topic>/implementation-spec.md
+cat <implementation_spec_path> | /Users/bytedance/Dev/p/harness/bin/implement-with-reviewer --implementer codex --reviewer codex
 ```
