@@ -30,7 +30,7 @@ func (c *CodexCliTool) SendMessage(options CliToolSendMessageOptions) (stdout st
 		options.CreateNewSession = true
 	}
 
-	cmdArgs := []string{"exec"}
+	cmdArgs := []string{"exec --skip-git-repo-check --yolo"}
 	if !options.CreateNewSession {
 		cmdArgs = append(cmdArgs, "resume", *c.existingSessionId)
 	}
