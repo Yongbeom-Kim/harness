@@ -1,6 +1,6 @@
 ---
 name: design-feature
-description: "Turn ideas into reviewed design specs through collaborative dialogue. Produces artifacts on disk.
+description: "Turn ideas into reviewed design specs through collaborative dialogue. Produces artifacts on disk."
 ---
 
 # Design and Plan
