@@ -23,35 +23,47 @@ In the directory, there will be two documents: a raw log of design decisions mad
 
 You are tasked with creating a comprehensive implementation plan from the design document given.
 
-Write the implementation plan to `${PWD}/docs/development/YYYY-MM-DD-<topic>/implementation-spec.md`.
+This skill produces two artifacts in `${PWD}/docs/development/YYYY-MM-DD-<topic>/`:
 
-## Component Breakdown
+1. **Implementation Decisions Log**: `implementation-decisions-raw.md` capturing the implementation-architecture Q&A decisions.
+2. **Implementation Spec**: `implementation-spec.md` containing the approved execution plan.
 
-Before defining tasks, map out all changes that need to be made, and come up with a logical model of which "component" is responsible for which changes. This is possibly the MOST IMPORTANT step of the planning process.
+## Steps
 
-Ask yourself: "Which component should take responsibility for this operation?" and check whether such a component already exists.
+Create a task for each step and complete them in order:
 
-If such a component already exists, consider extending the pre-existing component to support the requirement. If such a component does not exist, we need to create a new component.
+1. **Explore project context**: Check the design document, decision log, relevant code, existing file structure, and recent commits.
+2. **Implementation Q&A**: Ask **many rounds** of implementation-structure questions before writing the plan.
+   - The purpose of this Q&A is to determine the components that will be created or edited, the file and folder structure, and the responsibility of each component.
+   - Questions should ALWAYS be multiple choice, with the options derived from the current codebase, design document, and repository patterns.
+   - Before asking a question, inspect the current codebase and design docs to see whether the answer is already implied by existing structure.
+   - Always provide a recommended option for each question.
+   - When you ask and receive an answer, save it to `${PWD}/docs/development/YYYY-MM-DD-<topic>/implementation-decisions-raw.md`.
+3. **Component Breakdown**: After the Q&A, write down the implementation component model before task planning.
+   - Ask: "Which component should take responsibility for this behavior?"
+   - Prefer extending an existing component when responsibility is already clear there.
+   - Create a new component only when no existing component cleanly owns the behavior.
+4. **File Structure Mapping**: Lock the file and folder structure before decomposing into tasks.
+   - Map which files will be created or modified.
+   - State what each file or folder is responsible for.
+   - Design focused units with clear boundaries and interfaces.
+   - In existing codebases, follow established patterns unless the design explicitly requires a new structure.
+5. **Write implementation spec**: Save to `${PWD}/docs/development/YYYY-MM-DD-<topic>/implementation-spec.md`.
+6. **Implementation spec review**: Read `./implementation-spec-reviewer-prompt.md`, spawn a reviewer subagent with that prompt, pass the implementation spec path plus the design spec path, wait for it to finish, apply any requested fixes, and repeat until the reviewer approves.
 
-## File Structure
+## Plan Requirements
 
-After looking at the component and responsibility structure, map out which files will be created or modified and what each one is responsible for. This is where decomposition decisions get locked in.
+The implementation spec must assume the implementer has no prior context. It must be executable without further design decisions.
 
-- Design units with clear boundaries and well-defined interfaces. Each file should have one clear responsibility.
-- You reason best about code you can hold in context at once, and your edits are more reliable when files are focused. Prefer smaller, focused files over large ones that do too much.
-- Files that change together should live together. Split by responsibility, not by technical layer.
-- In existing codebases, follow established patterns. If the codebase uses large files, don't unilaterally restructure - but if a file you're modifying has grown unwieldy, including a split in the plan is reasonable.
+### Required plan sections
 
-This structure informs the task decomposition. Each task should produce self-contained changes that make sense independently.
+Every implementation spec MUST include, in this order:
 
-## Bite-Sized Task Granularity
-
-**Each step is one action (2-5 minutes):**
-- "Write the failing test" - step
-- "Run it to make sure it fails" - step
-- "Implement the minimal code to make the test pass" - step
-- "Run the tests and make sure they pass" - step
-- "Commit" - step
+1. Plan header
+2. Component breakdown
+3. File and folder structure
+4. Implementation file allowlist
+5. Task list
 
 ## Plan Document Header
 
@@ -69,6 +81,72 @@ This structure informs the task decomposition. Each task should produce self-con
 ---
 ```
 
+## Component Breakdown Section
+
+Immediately after the header, include a section that names each component and its responsibility.
+
+Example shape:
+
+```markdown
+## Component Breakdown
+
+- `FeatureFlagEvaluator`: determines whether the feature is enabled for the current request.
+- `CheckoutFormState`: owns client-side state, validation triggers, and submit readiness.
+- `OrderSubmissionHandler`: translates validated form data into the existing backend request contract.
+```
+
+## File and Folder Structure Section
+
+After component breakdown, include a section that locks the file and folder structure.
+
+Example shape:
+
+```markdown
+## File and Folder Structure
+
+- Create `src/checkout/feature_flags.ts` - feature gating logic for checkout experiments.
+- Modify `src/checkout/form_state.ts` - extend existing checkout state machine with new fields.
+- Create `src/checkout/components/address_panel.tsx` - isolated address editing UI.
+- Modify `src/checkout/__tests__/form_state.test.ts` - regression coverage for new validation paths.
+```
+
+## Implementation File Allowlist Section
+
+After file and folder structure, include a section that enumerates the exact files the implementer is allowed to touch for the main work.
+
+Rules:
+- This section must be explicit and exhaustive for intentional feature work.
+- Prefer exact file paths over directories.
+- Separate primary implementation files from incidental files.
+- Incidental files are limited to small supporting edits such as imports, wiring, generated snapshots, or narrowly scoped config updates required to make the planned files build or test correctly.
+- If a file is not listed here, the implementer should assume it is out of bounds unless the plan explicitly marks it as an incidental exception.
+- Do not expand the allowlist just to fix unrelated preexisting test failures or lint issues.
+
+Example shape:
+
+```markdown
+## Implementation File Allowlist
+
+**Primary files:**
+- `src/checkout/feature_flags.ts`
+- `src/checkout/form_state.ts`
+- `src/checkout/components/address_panel.tsx`
+- `src/checkout/__tests__/form_state.test.ts`
+
+**Incidental-only files:**
+- `src/checkout/index.ts` - export wiring only.
+- `package.json` - dependency or script update only if required by the planned files.
+```
+
+## Bite-Sized Task Granularity
+
+**Each step is one action (2-5 minutes):**
+- "Write the failing test" - step
+- "Run it to make sure it fails" - step
+- "Implement the minimal code to make the test pass" - step
+- "Run the tests and make sure they pass" - step
+- "Commit" - step
+
 ## Task Structure
 
 ````markdown
@@ -78,6 +156,8 @@ This structure informs the task decomposition. Each task should produce self-con
 - Create: `exact/path/to/file.py`
 - Modify: `exact/path/to/existing.py:123-145`
 - Test: `tests/exact/path/to/test.py`
+
+**Why:** [What responsibility this task establishes or extends]
 
 - [ ] **Step 1: Write the failing test**
 
@@ -113,16 +193,16 @@ git commit -m "feat: add specific feature"
 ````
 
 ## Remember
-- Exact file paths always
-- Complete code in plan (not "add validation")
-- Exact commands with expected output
-- Reference relevant skills with @ syntax
-- DRY, YAGNI, TDD, frequent commits
-
-## Review
-
-After writing the implementation spec, read `./implementation-spec-reviewer-prompt.md`, spawn a reviewer subagent with that prompt, pass the implementation spec path plus the design spec path, wait for it to finish, apply any requested fixes, and repeat until the reviewer approves.
-
+- Exact file paths always.
+- Complete code in plan, not vague descriptions like "add validation".
+- Exact commands with expected output.
+- Reference relevant skills with `@` syntax when applicable.
+- DRY, YAGNI, TDD, frequent commits.
+- Do not start task planning until the component boundaries and file structure are explicit.
+- The plan must declare the exact implementation file allowlist before task planning starts.
+- Task boundaries should follow the component responsibilities decided during the Q&A.
+- Keep the allowlist tight. Do not include speculative files "just in case".
+- If tests or lint already fail outside the feature scope, record that as preexisting context rather than planning unrelated fixes.
 
 ### Output
 
