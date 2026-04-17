@@ -129,5 +129,5 @@ After writing the implementation spec, read `./implementation-spec-reviewer-prom
 After all steps, print a single copy-pasteable command for a fresh window and stop:
 
 ```
-cat <implementation_spec_path> | /Users/bytedance/Dev/p/harness/bin/implement-with-reviewer --implementer codex --reviewer codex
+cat <implementation_spec_path> | implement-with-reviewer --implementer codex --reviewer codex
 ```
