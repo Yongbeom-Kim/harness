@@ -19,8 +19,17 @@ Do NOT write any code, scaffold any project, or invoke any implementation skill.
 Create a task for each step and complete them in order:
 1. **Explore project context**: Check files, docs, recent commits.
 2. **Clarifying Questions**: Ask **many rounds** of questions to the user, regarding product and design decisions, as well as any edge cases.
-    - Questions should ALWAYS be multiple choice, with the options derived from the current context and other files in the repository.
-    - Before asking a question, navigate the current codebase, and check if this question can be answered with your current context. Always try to provide a recommended option for each question.
+    - Ask all Q&A in plain text using this exact structure:
+      `1. <QUESTION>`
+      `A: ...`
+      `B: ...`
+      `C: ...`
+      `D: ...`
+    - Number questions consecutively within each round. Keep the option labels exactly `A`, `B`, `C`, `D`.
+    - Put the recommended option first when possible and mark it inline with `(Recommended)`.
+    - Derive the options from the current context and other files in the repository.
+    - Before asking a question, navigate the current codebase and check if this question can already be answered from current context.
+    - Expect the user to answer in compact form such as `1A2B3A4D`. Parse that mapping by question number. If the response is ambiguous, ask a minimal follow-up.
     - When you ask and receive an answer to the question, save it to `${PWD}/docs/development/YYYY-MM-DD-<topic>/decisions-raw.md`.
 3. **Write design doc**: Save to `${PWD}/docs/development/YYYY-MM-DD-<topic>/design-document.md`.
 4. **Design document review**: Read `./design-document-reviewer-prompt.md`, spawn a reviewer subagent with the design doc path, wait for it to finish, and read its output before proceeding.

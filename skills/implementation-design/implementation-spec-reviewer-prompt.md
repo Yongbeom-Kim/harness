@@ -25,6 +25,10 @@ Use the repository tools available in the current Codex session for planning, co
 
 | Category | What to Look For |
 |----------|------------------|
+| Requirement Coverage | Every requirement and material edge case from the design spec appears in the plan's requirement coverage matrix |
+| Ownership Clarity | Each matrix row has exactly one primary owner, collaborators are secondary, and no responsibility is left ambiguous or duplicated |
+| Interface Clarity | Component interactions and contracts are explicit enough that an implementer would not need to rediscover APIs, events, schemas, or sequencing rules |
+| File Ownership Consistency | Requirement coverage matrix file references, file ownership map, allowlist, and task files agree on which component owns which files |
 | Completeness | TODOs, placeholders, incomplete tasks, missing steps |
 | Spec Alignment | Plan covers design spec requirements, no major scope creep or missed requirements |
 | Task Decomposition | Tasks have clear boundaries, steps are actionable, dependencies are explicit |
@@ -40,8 +44,10 @@ dependency mid-task — those are issues. Minor wording improvements, stylistic
 preferences, and "nice to have" suggestions are not.
 
 Approve unless there are serious gaps — missing requirements from the design spec,
-contradictory steps, placeholder content, circular dependencies, or tasks so vague
-they can't be acted on.
+contradictory steps, placeholder content, circular dependencies, tasks so vague
+they can't be acted on, requirements without a clear primary owner, interfaces
+left implicit, or file ownership that does not line up across the requirement matrix,
+file ownership map, allowlist, and task plan.
 
 ## Process
 
@@ -56,16 +62,19 @@ return {"status": "MAX_ITERATIONS", "iterations": 5}
 ```
 
 1. Read both the plan and the design spec
-2. Check the plan against the criteria above
-3. If no issues: report APPROVED
-4. If issues found: fix them directly in the plan file, then re-read and re-review
-5. Repeat until approved or 5 iterations
+2. Enumerate the requirements and material edge cases from the design spec
+3. Check that each one appears in the requirement coverage matrix with exactly one primary owner, concrete files, interface points, and planned tests
+4. Check that the files named in each requirement coverage row are represented consistently in the file ownership map, implementation file allowlist, and tasks that claim to cover that requirement
+5. Check the rest of the plan against the criteria above
+6. If no issues: report APPROVED
+7. If issues found: fix them directly in the plan file, then re-read and re-review
+8. Repeat until approved or 5 iterations
 
 ## Output Format
 
 **Status:** APPROVED | MAX_ITERATIONS
 **Iterations:** N
 **Changes Made:**
-- [Task X, Step Y]: [what was changed] - [why]
+- [Section or Task]: [what was changed] - [why]
 **Remaining Issues (if MAX_ITERATIONS):**
-- [Task X, Step Y]: [issue] - [why it matters for implementation]
+- [Section or Task]: [issue] - [why it matters for implementation]

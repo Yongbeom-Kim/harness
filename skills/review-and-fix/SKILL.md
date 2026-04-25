@@ -16,26 +16,21 @@ Dispatch a single reviewer subagent that reviews code changes across correctness
 
 | Input | Required | Source |
 |---|---|---|
-| `BASE_SHA` | No | User argument or interactive ask. Diff is always base_sha vs working tree. |
+| `BASE_SHA` | No | User argument or plain-text Q&A ask. Diff is always base_sha vs working tree. |
 | `SPEC_FILE_PATH` | No | Passed by `implement` |
 | `PLAN_FILE_PATH` | No | Passed by `implement` |
 
-If `BASE_SHA` is not provided as an argument, ask the user interactively with the current request-input tool:
+If `BASE_SHA` is not provided as an argument, ask the user in plain text using the standard numbered Q&A format:
 
 ```
-request_user_input({
-  questions: [{
-    header: "Base SHA",
-    id: "base_sha_strategy",
-    question: "What base commit should I diff against?",
-    options: [
-      { label: "HEAD~1 (Recommended)", description: "Compare against the previous commit." },
-      { label: "main/master", description: "Compare against the repository's main branch." },
-      { label: "Merge base", description: "Auto-detect the merge base with the main branch." }
-    ]
-  }]
-})
+1. What base commit should I diff against?
+A: `HEAD~1` (Recommended) - Compare against the previous commit.
+B: `main` or `master` - Compare against the repository's main branch.
+C: Merge base - Auto-detect the merge base with the main branch.
+D: Custom base SHA - User will provide an explicit commit or ref.
 ```
+
+Expect a compact reply such as `1A`. If the user selects `1D`, ask one short follow-up for the explicit commit or ref.
 
 ## Control Flow
 
