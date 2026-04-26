@@ -5,7 +5,9 @@ func NewClaudeSession(opts SessionOptions) (Session, error) {
 		"claude",
 		"claude",
 		nil,
-		"You are running inside a persistent Claude tmux session. Acknowledge initialization briefly and wait for the next task.",
+		"You are running inside a persistent Claude tmux session. Reply with exactly Ready. Do not use tools or inspect files. Wait for the next task.",
+		nil,
+		false,
 		opts,
 	)
 }

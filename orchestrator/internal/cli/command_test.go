@@ -3,6 +3,7 @@ package cli
 import (
 	"errors"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -16,12 +17,8 @@ func TestRunTurnWaitsForDoneAfterPromptBoundary(t *testing.T) {
 
 	userPrompt := "Review this draft:\npackage demo\nconst Token = \"v1\"\n<promise>done</promise>\n"
 	decoratedPrompt := session.decorateTurnPrompt(userPrompt)
-
-	captures := []string{
-		"> ",
-		"> " + decoratedPrompt + "\n",
-		"> " + decoratedPrompt + "\nUse Token = \"v2\"\n<promise>done</promise>\n",
-	}
+	sentPrompt := ""
+	captureCalls := 0
 	var commands [][]string
 
 	withRunCommandStub(t, func(name string, args ...string) (commandResult, error) {
@@ -32,13 +29,16 @@ func TestRunTurnWaitsForDoneAfterPromptBoundary(t *testing.T) {
 
 		switch args[0] {
 		case "capture-pane":
-			if len(captures) == 0 {
-				t.Fatal("unexpected capture-pane call")
+			if sentPrompt == "" {
+				t.Fatal("capture happened before prompt was sent")
 			}
-			capture := captures[0]
-			captures = captures[1:]
+			captureCalls++
+			capture := "> " + sentPrompt + "\n"
+			if captureCalls > 1 {
+				capture += "Use Token = \"v2\"\n<promise>done</promise>\n"
+			}
 			return commandResult{stdout: capture}, nil
-		case "set-buffer", "paste-buffer", "clear-history":
+		case "paste-buffer", "clear-history":
 			return commandResult{}, nil
 		case "send-keys":
 			return commandResult{}, nil
@@ -46,6 +46,20 @@ func TestRunTurnWaitsForDoneAfterPromptBoundary(t *testing.T) {
 			t.Fatalf("unexpected tmux invocation: %v", args)
 			return commandResult{}, nil
 		}
+	})
+	withRunCommandWithInputStub(t, func(input string, name string, args ...string) (commandResult, error) {
+		commands = append(commands, append([]string{name}, args...))
+		if name != "tmux" {
+			t.Fatalf("unexpected command %q", name)
+		}
+		if !strings.HasSuffix(input, "\n"+decoratedPrompt) {
+			t.Fatalf("buffer input should prepend metadata and end with the decorated prompt:\nwant suffix: %q\ngot:         %q", "\n"+decoratedPrompt, input)
+		}
+		if len(args) != 4 || args[0] != "load-buffer" || args[1] != "-b" || args[3] != "-" {
+			t.Fatalf("unexpected tmux invocation: %v", args)
+		}
+		sentPrompt = input
+		return commandResult{}, nil
 	})
 
 	result, err := session.RunTurn(userPrompt)
@@ -63,12 +77,8 @@ func TestRunTurnWaitsForDoneAfterPromptBoundary(t *testing.T) {
 		t.Fatalf("unexpected raw capture:\nwant: %q\ngot:  %q", wantRawCapture, result.RawCapture)
 	}
 
-	if len(captures) != 0 {
-		t.Fatalf("unused capture responses: %d", len(captures))
-	}
-
 	wantTail := [][]string{
-		{"tmux", "send-keys", "-R", "-t", session.sessionName},
+		{"tmux", "send-keys", "-t", session.sessionName, "-R"},
 		{"tmux", "clear-history", "-t", session.sessionName},
 	}
 	gotTail := commands[len(commands)-2:]
@@ -83,10 +93,13 @@ func TestBuildSourcedLauncherPreservesAgentrcPath(t *testing.T) {
 	if strings.Contains(launcher, "export PATH=") {
 		t.Fatalf("launcher should not overwrite PATH: %s", launcher)
 	}
-	if !strings.Contains(launcher, `if [ -f "$HOME/.agentrc" ]; then . "$HOME/.agentrc"; fi; stty -echo; exec`) {
-		t.Fatalf("launcher should source .agentrc before exec: %s", launcher)
+	if !strings.Contains(launcher, `if [ -f "$HOME/.agentrc" ]; then . "$HOME/.agentrc"; fi; stty -echo;`) {
+		t.Fatalf("launcher should source .agentrc before invoking the backend command: %s", launcher)
 	}
-	if !strings.Contains(launcher, "codex") {
+	if strings.Contains(launcher, `; exec `) {
+		t.Fatalf("launcher should not use exec because that bypasses shell functions from .agentrc: %s", launcher)
+	}
+	if !strings.Contains(launcher, `'codex'`) {
 		t.Fatalf("launcher should reference backend command: %s", launcher)
 	}
 }
@@ -100,11 +113,8 @@ func TestStartNormalizesResetFailureToStartup(t *testing.T) {
 
 	rolePrompt := "You are the implementer."
 	decoratedPrompt := session.decorateStartupPrompt(rolePrompt)
-
-	captures := []string{
-		"> ",
-		"> " + decoratedPrompt + "\nready\n<promise>done</promise>\n",
-	}
+	promptSent := false
+	sentPrompt := ""
 
 	withRunCommandStub(t, func(name string, args ...string) (commandResult, error) {
 		if name != "tmux" {
@@ -113,16 +123,14 @@ func TestStartNormalizesResetFailureToStartup(t *testing.T) {
 
 		switch args[0] {
 		case "capture-pane":
-			if len(captures) == 0 {
-				t.Fatal("unexpected capture-pane call")
+			if !promptSent {
+				return commandResult{stdout: "> "}, nil
 			}
-			capture := captures[0]
-			captures = captures[1:]
-			return commandResult{stdout: capture}, nil
-		case "set-buffer", "paste-buffer", "clear-history":
+			return commandResult{stdout: "> " + sentPrompt + "\nready\n<promise>done</promise>\n"}, nil
+		case "paste-buffer", "clear-history":
 			return commandResult{}, nil
 		case "send-keys":
-			if len(args) >= 2 && args[1] == "-R" {
+			if slices.Contains(args, "-R") {
 				return commandResult{}, errors.New("reset failed")
 			}
 			return commandResult{}, nil
@@ -130,6 +138,20 @@ func TestStartNormalizesResetFailureToStartup(t *testing.T) {
 			t.Fatalf("unexpected tmux invocation: %v", args)
 			return commandResult{}, nil
 		}
+	})
+	withRunCommandWithInputStub(t, func(input string, name string, args ...string) (commandResult, error) {
+		if name != "tmux" {
+			t.Fatalf("unexpected command %q", name)
+		}
+		if !strings.HasSuffix(input, "\n"+decoratedPrompt) {
+			t.Fatalf("buffer input should prepend metadata and end with the decorated prompt:\nwant suffix: %q\ngot:         %q", "\n"+decoratedPrompt, input)
+		}
+		if len(args) != 4 || args[0] != "load-buffer" || args[1] != "-b" || args[3] != "-" {
+			t.Fatalf("unexpected tmux invocation: %v", args)
+		}
+		promptSent = true
+		sentPrompt = input
+		return commandResult{}, nil
 	})
 
 	err := session.Start(rolePrompt)
@@ -217,5 +239,15 @@ func withRunCommandStub(t *testing.T, stub func(name string, args ...string) (co
 	runCommand = stub
 	t.Cleanup(func() {
 		runCommand = original
+	})
+}
+
+func withRunCommandWithInputStub(t *testing.T, stub func(input string, name string, args ...string) (commandResult, error)) {
+	t.Helper()
+
+	original := runCommandWithInput
+	runCommandWithInput = stub
+	t.Cleanup(func() {
+		runCommandWithInput = original
 	})
 }

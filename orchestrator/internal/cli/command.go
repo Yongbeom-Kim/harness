@@ -12,6 +12,8 @@ import (
 const (
 	completionInstruction = "Finish your response with exactly <promise>done</promise>."
 	defaultIdleTimeout    = 120 * time.Second
+	startupReadyTimeout   = 30 * time.Second
+	startupQuietPeriod    = 1500 * time.Millisecond
 	commandTimeout        = 10 * time.Second
 	capturePollInterval   = 250 * time.Millisecond
 	// tmux capture-pane -S uses negative values to address scrollback history.
@@ -20,8 +22,9 @@ const (
 )
 
 var (
-	execCommand = exec.CommandContext
-	runCommand  = defaultRunCommand
+	execCommand         = exec.CommandContext
+	runCommand          = defaultRunCommand
+	runCommandWithInput = defaultRunCommandWithInput
 )
 
 type persistentSession struct {
@@ -30,10 +33,12 @@ type persistentSession struct {
 	idleTimeout        time.Duration
 	startupInstruction string
 	launchCommand      string
+	readyMatcher       func(string) bool
+	skipPaneReset      bool
 	closed             bool
 }
 
-func newPersistentSession(backendName string, command string, args []string, startupInstruction string, opts SessionOptions) (Session, error) {
+func newPersistentSession(backendName string, command string, args []string, startupInstruction string, readyMatcher func(string) bool, skipPaneReset bool, opts SessionOptions) (Session, error) {
 	sessionName := sessionNameFor(opts.RunID, opts.Role)
 	session := &persistentSession{
 		backendName:        backendName,
@@ -41,6 +46,8 @@ func newPersistentSession(backendName string, command string, args []string, sta
 		idleTimeout:        opts.IdleTimeout,
 		startupInstruction: startupInstruction,
 		launchCommand:      buildSourcedLauncher(command, args...),
+		readyMatcher:       readyMatcher,
+		skipPaneReset:      skipPaneReset,
 	}
 	if session.idleTimeout <= 0 {
 		session.idleTimeout = defaultIdleTimeout
@@ -52,9 +59,15 @@ func newPersistentSession(backendName string, command string, args []string, sta
 }
 
 func (s *persistentSession) Start(rolePrompt string) error {
+	if err := s.waitForReady(); err != nil {
+		return s.normalizeStartupError(err)
+	}
 	result, err := s.runPrompt(s.decorateStartupPrompt(rolePrompt))
 	if err != nil {
 		return s.normalizeStartupError(err)
+	}
+	if s.skipPaneReset {
+		return nil
 	}
 	if err := s.resetPane(); err != nil {
 		return s.normalizeStartupError(NewSessionError(SessionErrorKindCapture, s.sessionName, result.RawCapture, err))
@@ -62,10 +75,47 @@ func (s *persistentSession) Start(rolePrompt string) error {
 	return nil
 }
 
+func (s *persistentSession) waitForReady() error {
+	deadline := time.Now().Add(startupReadyTimeout)
+	lastCapture := ""
+	lastChange := time.Now()
+	firstCapture := true
+
+	for {
+		capture, err := s.capturePane()
+		if err != nil {
+			return NewSessionError(SessionErrorKindCapture, s.sessionName, lastCapture, err)
+		}
+
+		if firstCapture || capture != lastCapture {
+			lastCapture = capture
+			lastChange = time.Now()
+			firstCapture = false
+		}
+
+		ready := true
+		if s.readyMatcher != nil {
+			ready = s.readyMatcher(capture)
+		}
+		if ready && time.Since(lastChange) >= startupQuietPeriod {
+			return nil
+		}
+
+		if time.Now().After(deadline) {
+			return NewSessionError(SessionErrorKindStartup, s.sessionName, lastCapture, fmt.Errorf("session did not become ready for startup prompt within %s", startupReadyTimeout))
+		}
+
+		time.Sleep(capturePollInterval)
+	}
+}
+
 func (s *persistentSession) RunTurn(prompt string) (TurnResult, error) {
 	result, err := s.runPrompt(s.decorateTurnPrompt(prompt))
 	if err != nil {
 		return TurnResult{}, err
+	}
+	if s.skipPaneReset {
+		return result, nil
 	}
 	if err := s.resetPane(); err != nil {
 		return TurnResult{}, NewSessionError(SessionErrorKindCapture, s.sessionName, result.RawCapture, err)
@@ -148,28 +198,26 @@ func (s *persistentSession) decorateTurnPrompt(prompt string) string {
 }
 
 func (s *persistentSession) runPrompt(prompt string) (TurnResult, error) {
-	baseline, err := s.capturePane()
-	if err != nil {
+	turnMarker := s.nextTurnMarker()
+	markedPrompt := prependTurnMarker(prompt, turnMarker)
+
+	if err := s.sendPrompt(markedPrompt); err != nil {
 		return TurnResult{}, NewSessionError(SessionErrorKindCapture, s.sessionName, "", err)
 	}
 
-	if err := s.sendPrompt(prompt); err != nil {
-		return TurnResult{}, NewSessionError(SessionErrorKindCapture, s.sessionName, "", err)
-	}
-
-	rawCapture, err := s.waitForDone(prompt, baseline)
+	rawCapture, err := s.waitForDone(turnMarker)
 	if err != nil {
 		return TurnResult{}, err
 	}
 	return TurnResult{
-		Output:     sanitizeTurnCapture(rawCapture, prompt),
+		Output:     sanitizeTurnCapture(rawCapture),
 		RawCapture: rawCapture,
 	}, nil
 }
 
 func (s *persistentSession) sendPrompt(prompt string) error {
 	bufferName := fmt.Sprintf("%s-%d", s.sessionName, time.Now().UnixNano())
-	if _, err := runCommand("tmux", "set-buffer", "-b", bufferName, "--", prompt); err != nil {
+	if _, err := runCommandWithInput(prompt, "tmux", "load-buffer", "-b", bufferName, "-"); err != nil {
 		return err
 	}
 	if _, err := runCommand("tmux", "paste-buffer", "-d", "-p", "-b", bufferName, "-t", s.sessionName); err != nil {
@@ -181,24 +229,23 @@ func (s *persistentSession) sendPrompt(prompt string) error {
 	return nil
 }
 
-func (s *persistentSession) waitForDone(prompt string, baselineCapture string) (string, error) {
-	lastCapture := baselineCapture
+func (s *persistentSession) waitForDone(turnMarker string) (string, error) {
+	lastTurnCapture := ""
 	lastChange := time.Now()
 
 	for {
 		capture, err := s.capturePane()
 		if err != nil {
-			turnCapture := extractTurnCapture(lastCapture, baselineCapture)
-			return "", NewSessionError(SessionErrorKindCapture, s.sessionName, turnCapture, err)
+			return "", NewSessionError(SessionErrorKindCapture, s.sessionName, lastTurnCapture, err)
 		}
 
-		if capture != lastCapture {
-			lastCapture = capture
+		turnCapture := extractTurnCapture(capture, turnMarker)
+		if turnCapture != lastTurnCapture {
+			lastTurnCapture = turnCapture
 			lastChange = time.Now()
 		}
 
-		turnCapture := extractTurnCapture(capture, baselineCapture)
-		if hasExactLine(responseCapture(turnCapture, prompt), "<promise>done</promise>") {
+		if hasExactLine(responseCapture(turnCapture), "<promise>done</promise>") {
 			return turnCapture, nil
 		}
 
@@ -219,7 +266,7 @@ func (s *persistentSession) capturePane() (string, error) {
 }
 
 func (s *persistentSession) resetPane() error {
-	if _, err := runCommand("tmux", "send-keys", "-R", "-t", s.sessionName); err != nil {
+	if _, err := runCommand("tmux", "send-keys", "-t", s.sessionName, "-R"); err != nil {
 		return err
 	}
 	// TODO: clean-history is probably not the cleanest way to do this, and hurts interactivity.
@@ -236,6 +283,10 @@ type commandResult struct {
 }
 
 func defaultRunCommand(name string, args ...string) (commandResult, error) {
+	return defaultRunCommandWithInput("", name, args...)
+}
+
+func defaultRunCommandWithInput(input string, name string, args ...string) (commandResult, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), commandTimeout)
 	defer cancel()
 
@@ -244,6 +295,9 @@ func defaultRunCommand(name string, args ...string) (commandResult, error) {
 	var stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
+	if input != "" {
+		cmd.Stdin = strings.NewReader(input)
+	}
 	err := cmd.Run()
 
 	result := commandResult{
@@ -271,7 +325,9 @@ func buildSourcedLauncher(command string, args ...string) string {
 	for _, arg := range args {
 		quotedCommand = append(quotedCommand, shellQuote(arg))
 	}
-	script := `if [ -f "$HOME/.agentrc" ]; then . "$HOME/.agentrc"; fi; stty -echo; exec ` + strings.Join(quotedCommand, " ")
+	// Run through the sourced shell so shell functions from .agentrc (for example
+	// backend wrappers) participate in command lookup. `exec` would bypass them.
+	script := `if [ -f "$HOME/.agentrc" ]; then . "$HOME/.agentrc"; fi; stty -echo; ` + strings.Join(quotedCommand, " ")
 	return "bash -lc " + shellQuote(script)
 }
 
@@ -303,32 +359,43 @@ func hasExactLine(text string, target string) bool {
 	return false
 }
 
-func extractTurnCapture(capture string, baseline string) string {
+func (s *persistentSession) nextTurnMarker() string {
+	return fmt.Sprintf("<iwr:%x>", time.Now().UnixNano())
+}
+
+func prependTurnMarker(prompt string, marker string) string {
+	if marker == "" {
+		return prompt
+	}
+	return marker + "\n" + prompt
+}
+
+func extractTurnCapture(capture string, marker string) string {
 	if capture == "" {
 		return ""
 	}
-	if baseline == "" {
+	if marker == "" {
 		return capture
 	}
-	if strings.HasPrefix(capture, baseline) {
-		return capture[len(baseline):]
+	index := strings.Index(capture, marker)
+	if index < 0 {
+		return ""
 	}
+	return stripTurnMarker(capture[index:], marker)
+}
 
-	limit := len(baseline)
-	if len(capture) < limit {
-		limit = len(capture)
+func stripTurnMarker(capture string, marker string) string {
+	if marker == "" {
+		return capture
 	}
-	for overlap := limit; overlap > 0; overlap-- {
-		if strings.HasSuffix(baseline, capture[:overlap]) {
-			return capture[overlap:]
-		}
+	if strings.HasPrefix(capture, marker) {
+		return capture[skipLineBreaks(capture, len(marker)):]
 	}
-
 	return capture
 }
 
-func sanitizeTurnCapture(capture string, prompt string) string {
-	trimmed := strings.TrimLeft(responseCapture(capture, prompt), "\r\n")
+func sanitizeTurnCapture(capture string) string {
+	trimmed := strings.TrimLeft(responseCapture(capture), "\r\n")
 	trimmed = strings.TrimRight(trimmed, "\r\n")
 	if trimmed == "" {
 		return ""
@@ -336,52 +403,12 @@ func sanitizeTurnCapture(capture string, prompt string) string {
 	return trimmed + "\n"
 }
 
-func responseCapture(capture string, prompt string) string {
-	boundary := promptBoundaryIndex(capture, prompt)
-	if boundary >= len(capture) {
-		return ""
+func responseCapture(capture string) string {
+	index := strings.LastIndex(capture, completionInstruction)
+	if index < 0 {
+		return capture
 	}
-	return capture[boundary:]
-}
-
-func promptBoundaryIndex(capture string, prompt string) int {
-	if capture == "" {
-		return 0
-	}
-
-	base := strings.TrimRight(prompt, "\n")
-	searchLimit := len(capture)
-	if base != "" && len(base)+256 < searchLimit {
-		searchLimit = len(base) + 256
-	}
-	window := capture[:searchLimit]
-
-	for _, candidate := range promptEchoCandidates(prompt) {
-		if candidate == "" {
-			continue
-		}
-		if idx := strings.Index(window, candidate); idx >= 0 {
-			return skipLineBreaks(capture, idx+len(candidate))
-		}
-	}
-
-	if idx := strings.Index(window, completionInstruction); idx >= 0 {
-		return skipLineBreaks(capture, idx+len(completionInstruction))
-	}
-
-	return 0
-}
-
-func promptEchoCandidates(prompt string) []string {
-	base := strings.TrimRight(prompt, "\n")
-	if base == "" {
-		return nil
-	}
-	return []string{
-		base,
-		base + "\n",
-		strings.TrimSpace(base),
-	}
+	return capture[skipLineBreaks(capture, index+len(completionInstruction)):]
 }
 
 func skipLineBreaks(text string, index int) int {
