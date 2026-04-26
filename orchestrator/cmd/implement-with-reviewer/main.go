@@ -17,7 +17,7 @@ import (
 
 const (
 	defaultMaxIterations = 10
-	defaultIdleTimeout   = 120 * time.Second
+	defaultIdleTimeout   = 30 * time.Minute
 )
 
 var errEmptyTask = errors.New("task from stdin must not be empty")
