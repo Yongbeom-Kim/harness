@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"flag"
 	"fmt"
@@ -8,27 +9,28 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/Yongbeom-Kim/harness/orchestrator/internal/cli"
+	"github.com/Yongbeom-Kim/harness/orchestrator/internal/implementwithreviewer"
 )
 
 const (
-	approvedMarker          = "<promise>APPROVED</promise>"
-	defaultMaxIterations    = 10
-	implementerSystemPrompt = "You are an expert software implementer. When given a task or reviewer feedback, output only clean, working code. No explanations, no markdown fences unless the task explicitly requires a file."
-	reviewerSystemPrompt    = "You are a strict code reviewer. Review the implementation provided. If it is correct, complete, and handles edge cases properly, respond with exactly: <promise>APPROVED</promise> - nothing else. Otherwise respond with specific, actionable feedback only. No praise, no filler."
+	defaultMaxIterations = 10
+	defaultIdleTimeout   = 120 * time.Second
 )
-
-type toolFactory func(name string) (cli.CliTool, error)
 
 var errEmptyTask = errors.New("task from stdin must not be empty")
 
+type runFunc func(context.Context, implementwithreviewer.RunConfig) error
+
 type runnerConfig struct {
-	stdin   io.Reader
-	stdout  io.Writer
-	stderr  io.Writer
-	getenv  func(string) string
-	factory toolFactory
+	stdin           io.Reader
+	stdout          io.Writer
+	stderr          io.Writer
+	getenv          func(string) string
+	validateBackend func(string) error
+	run             runFunc
 }
 
 type stringFlag struct {
@@ -48,17 +50,18 @@ func (f *stringFlag) Set(value string) error {
 
 func main() {
 	os.Exit(run(os.Args[1:], runnerConfig{
-		stdin:  os.Stdin,
-		stdout: os.Stdout,
-		stderr: os.Stderr,
-		getenv: os.Getenv,
-		factory: func(name string) (cli.CliTool, error) {
-			return newCliTool(name)
-		},
+		stdin:           os.Stdin,
+		stdout:          os.Stdout,
+		stderr:          os.Stderr,
+		getenv:          os.Getenv,
+		validateBackend: cli.ValidateBackend,
+		run:             implementwithreviewer.Run,
 	}))
 }
 
 func run(args []string, cfg runnerConfig) int {
+	cfg = defaultRunnerConfig(cfg)
+
 	flagSet := flag.NewFlagSet("implement-with-reviewer", flag.ContinueOnError)
 	flagSet.SetOutput(cfg.stderr)
 
@@ -93,13 +96,11 @@ func run(args []string, cfg runnerConfig) int {
 		return 2
 	}
 
-	implementerTool, err := cfg.factory(*implementer)
-	if err != nil {
+	if err := cfg.validateBackend(*implementer); err != nil {
 		fmt.Fprintln(cfg.stderr, err.Error())
 		return 2
 	}
-	reviewerTool, err := cfg.factory(*reviewer)
-	if err != nil {
+	if err := cfg.validateBackend(*reviewer); err != nil {
 		fmt.Fprintln(cfg.stderr, err.Error())
 		return 2
 	}
@@ -113,81 +114,52 @@ func run(args []string, cfg runnerConfig) int {
 		return 1
 	}
 
-	fmt.Fprintf(cfg.stdout, "Implementer : %s\n", *implementer)
-	fmt.Fprintf(cfg.stdout, "Reviewer    : %s\n", *reviewer)
-	fmt.Fprintf(cfg.stdout, "Task        : %s\n", task)
-
-	implementation, ok := invokeAgent(cfg, bannerTitle(0, "IMPLEMENTER", *implementer), implementerTool, implementerSystemPrompt, task)
-	if !ok {
+	err = cfg.run(context.Background(), implementwithreviewer.RunConfig{
+		Task:              task,
+		Implementer:       *implementer,
+		Reviewer:          *reviewer,
+		MaxIterations:     maxIterations,
+		IdleTimeout:       defaultIdleTimeout,
+		Stdout:            cfg.stdout,
+		Stderr:            cfg.stderr,
+		NewSession:        cli.NewSession,
+		NewArtifactWriter: implementwithreviewer.NewArtifactWriter,
+		NewRunID:          implementwithreviewer.NewRunID,
+	})
+	if err != nil {
+		if exitErr, ok := implementwithreviewer.AsExitError(err); ok {
+			if !exitErr.Silent() {
+				fmt.Fprintln(cfg.stderr, err.Error())
+			}
+			return exitErr.Code()
+		}
+		fmt.Fprintln(cfg.stderr, err.Error())
 		return 1
 	}
 
-	for iteration := 1; iteration <= maxIterations; iteration++ {
-		reviewPrompt := fmt.Sprintf("Task given to implementer:\n%s\n\nImplementation:\n%s", task, implementation)
-		review, approved, ok := reviewIteration(cfg, iteration, *reviewer, reviewerTool, reviewPrompt)
-		if !ok {
-			return 1
-		}
-		if approved {
-			fmt.Fprintln(cfg.stdout)
-			fmt.Fprintf(cfg.stdout, "Approved after %d review round(s).\n", iteration)
-			fmt.Fprintln(cfg.stdout)
-			fmt.Fprintln(cfg.stdout, "Final implementation")
-			fmt.Fprintln(cfg.stdout, implementation)
-			return 0
-		}
-
-		rewritePrompt := fmt.Sprintf("Original task:\n%s\n\nYour previous implementation:\n%s\n\nReviewer feedback:\n%s\n\nRewrite addressing all feedback.", task, implementation, review)
-		implementation, ok = invokeAgent(cfg, bannerTitle(iteration, "IMPLEMENTER", *implementer), implementerTool, implementerSystemPrompt, rewritePrompt)
-		if !ok {
-			return 1
-		}
-	}
-
-	fmt.Fprintln(cfg.stdout)
-	fmt.Fprintf(cfg.stdout, "Did not converge after %d iterations.\n", maxIterations)
-	return 1
+	return 0
 }
 
-func reviewIteration(cfg runnerConfig, iteration int, reviewerName string, reviewerTool cli.CliTool, prompt string) (review string, approved bool, ok bool) {
-	review, ok = invokeAgent(cfg, bannerTitle(iteration, "REVIEWER", reviewerName), reviewerTool, reviewerSystemPrompt, prompt)
-	if !ok {
-		return "", false, false
+func defaultRunnerConfig(cfg runnerConfig) runnerConfig {
+	if cfg.stdin == nil {
+		cfg.stdin = os.Stdin
 	}
-	return review, strings.Contains(review, approvedMarker), true
-}
-
-func invokeAgent(cfg runnerConfig, banner string, tool cli.CliTool, systemPrompt string, prompt string) (string, bool) {
-	printBanner(cfg.stdout, banner)
-	stdout, stderr, err := tool.SendMessage(cli.CliToolSendMessageOptions{
-		Message: fmt.Sprintf("%s\n\n%s", systemPrompt, prompt),
-	})
-	if stdout != "" {
-		fmt.Fprint(cfg.stdout, stdout)
-		if !strings.HasSuffix(stdout, "\n") {
-			fmt.Fprintln(cfg.stdout)
-		}
+	if cfg.stdout == nil {
+		cfg.stdout = os.Stdout
 	}
-	if stderr != "" {
-		fmt.Fprint(cfg.stderr, stderr)
-		if !strings.HasSuffix(stderr, "\n") {
-			fmt.Fprintln(cfg.stderr)
-		}
+	if cfg.stderr == nil {
+		cfg.stderr = os.Stderr
 	}
-	if err != nil {
-		fmt.Fprintf(cfg.stderr, "agent invocation failed: %v\n", err)
-		return "", false
+	if cfg.getenv == nil {
+		cfg.getenv = os.Getenv
 	}
-	return stdout, true
-}
-
-func printBanner(w io.Writer, title string) {
-	fmt.Fprintln(w)
-	fmt.Fprintf(w, "--- %s ---\n", title)
-}
-
-func bannerTitle(iteration int, role string, backend string) string {
-	return fmt.Sprintf("iter %d - %s (%s)", iteration, role, backend)
+	if cfg.validateBackend == nil {
+		cfg.validateBackend = cli.ValidateBackend
+	}
+	if cfg.run == nil {
+		cfg.run = implementwithreviewer.Run
+	}
+	return cfg
 }
 
 func resolveMaxIterations(flagValue stringFlag, getenv func(string) string) (int, error) {
@@ -221,15 +193,4 @@ func readTask(r io.Reader) (string, error) {
 		return "", errEmptyTask
 	}
 	return task, nil
-}
-
-func newCliTool(name string) (cli.CliTool, error) {
-	switch name {
-	case "codex":
-		return cli.NewCodexCliTool(nil), nil
-	case "claude":
-		return cli.NewClaudeCliTool(nil), nil
-	default:
-		return nil, fmt.Errorf("unknown backend: %s (expected codex or claude)", name)
-	}
 }
