@@ -1,3 +1,14 @@
 #!/bin/bash
 
-# Any overrides you want to put in your claude/codex/etc executables.
+# Add any other overrides / configurations
+codex() {
+    command codex --no-alt-screen --yolo "$@"
+}
+
+claude() {
+    command ttadk --dangerously-skip-permissions "$@"
+}
+
+agent() {
+    command agent --yolo "$@"
+}
