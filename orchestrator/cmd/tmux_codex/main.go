@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/Yongbeom-Kim/harness/orchestrator/internal/cli"
+	directorylock "github.com/Yongbeom-Kim/harness/orchestrator/internal/directory_lock"
 	"github.com/Yongbeom-Kim/harness/orchestrator/internal/tmux"
 )
 
@@ -22,6 +23,7 @@ type runnerConfig struct {
 	stderr      io.Writer
 	openSession openSessionFunc
 	buildLaunch func(string, ...string) string
+	lock        directorylock.Locker
 }
 
 type RunnerOption func(*runnerConfig)
@@ -36,12 +38,22 @@ func main() {
 }
 
 func run(args []string) int {
-	parsed, exitCode, ok := parseArgs(args, os.Stderr)
+	return runWithConfig(args, NewRunnerConfig())
+}
+
+func runWithConfig(args []string, cfg runnerConfig) int {
+	if err := cfg.lock.Acquire(); err != nil {
+		fmt.Fprintln(cfg.stderr, err.Error())
+		return 1
+	}
+	defer cfg.lock.Release()
+
+	parsed, exitCode, ok := parseArgs(args, cfg.stderr)
 	if !ok {
 		return exitCode
 	}
 
-	return runCodex(NewRunnerConfig(), parsed)
+	return runCodex(cfg, parsed)
 }
 
 func parseArgs(args []string, stderr io.Writer) (parsedArgs, int, bool) {
@@ -111,6 +123,11 @@ func NewRunnerConfig(options ...RunnerOption) runnerConfig {
 		openSession: openTmuxSession,
 		buildLaunch: cli.BuildSourcedLauncher,
 	}
+	lock, err := directorylock.NewInCurrentDirectory()
+	if err != nil {
+		panic(err)
+	}
+	cfg.lock = lock
 	for _, option := range options {
 		if option != nil {
 			option(&cfg)
@@ -146,6 +163,12 @@ func WithOpenSession(openSession openSessionFunc) RunnerOption {
 func WithBuildLaunch(buildLaunch func(string, ...string) string) RunnerOption {
 	return func(cfg *runnerConfig) {
 		cfg.buildLaunch = buildLaunch
+	}
+}
+
+func WithLock(lock directorylock.Locker) RunnerOption {
+	return func(cfg *runnerConfig) {
+		cfg.lock = lock
 	}
 }
 

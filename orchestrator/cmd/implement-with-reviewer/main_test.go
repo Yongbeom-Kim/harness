@@ -23,6 +23,12 @@ type runRecorder struct {
 	err     error
 }
 
+type fakeLock struct {
+	acquireErr   error
+	acquireCalls int
+	releaseCalls int
+}
+
 func (panicReader) Read(_ []byte) (int, error) {
 	panic("stdin should not be read")
 }
@@ -34,6 +40,16 @@ func (r errReader) Read(_ []byte) (int, error) {
 func (r *runRecorder) run(_ context.Context, cfg implementwithreviewer.RunConfig) error {
 	r.configs = append(r.configs, cfg)
 	return r.err
+}
+
+func (l *fakeLock) Acquire() error {
+	l.acquireCalls++
+	return l.acquireErr
+}
+
+func (l *fakeLock) Release() error {
+	l.releaseCalls++
+	return nil
 }
 
 func TestRunValidationErrors(t *testing.T) {
@@ -64,6 +80,7 @@ func TestRunValidationErrors(t *testing.T) {
 				stdin:  strings.NewReader(tt.stdin),
 				stdout: &stdout,
 				stderr: &stderr,
+				lock:   &fakeLock{},
 				getenv: func(key string) string {
 					if tt.env == nil {
 						return ""
@@ -96,6 +113,7 @@ func TestRunHelpExitsZero(t *testing.T) {
 		stdin:           strings.NewReader(""),
 		stdout:          &stdout,
 		stderr:          &stderr,
+		lock:            &fakeLock{},
 		getenv:          func(string) string { return "" },
 		validateBackend: func(string) error { return nil },
 		run:             recorder.run,
@@ -135,6 +153,7 @@ func TestRunRejectsInvalidBackendBeforeReadingStdin(t *testing.T) {
 				stdin:  panicReader{},
 				stdout: &stdout,
 				stderr: &stderr,
+				lock:   &fakeLock{},
 				getenv: func(string) string { return "" },
 				validateBackend: func(name string) error {
 					if name == "bad" {
@@ -168,6 +187,7 @@ func TestRunReadTaskErrorExitsOne(t *testing.T) {
 		stdin:           errReader{err: readErr},
 		stdout:          &stdout,
 		stderr:          &stderr,
+		lock:            &fakeLock{},
 		getenv:          func(string) string { return "" },
 		validateBackend: func(string) error { return nil },
 		run:             recorder.run,
@@ -193,6 +213,7 @@ func TestRunSetsNewSession(t *testing.T) {
 		stdin:           strings.NewReader("task"),
 		stdout:          &bytes.Buffer{},
 		stderr:          &bytes.Buffer{},
+		lock:            &fakeLock{},
 		getenv:          func(string) string { return "" },
 		validateBackend: func(string) error { return nil },
 		run:             recorder.run,
@@ -217,6 +238,7 @@ func TestRunMaxIterationPrecedenceAndRunnerConfig(t *testing.T) {
 		stdin:  strings.NewReader("task body\n"),
 		stdout: &stdout,
 		stderr: &stderr,
+		lock:   &fakeLock{},
 		getenv: func(key string) string {
 			if key == "MAX_ITERATIONS" {
 				return "5"
@@ -263,6 +285,7 @@ func TestRunPropagatesRunnerExitCode(t *testing.T) {
 		stdin:           strings.NewReader("task"),
 		stdout:          &stdout,
 		stderr:          &stderr,
+		lock:            &fakeLock{},
 		getenv:          func(string) string { return "" },
 		validateBackend: func(string) error { return nil },
 		run:             recorder.run,
@@ -273,5 +296,35 @@ func TestRunPropagatesRunnerExitCode(t *testing.T) {
 	}
 	if stderr.String() != "" {
 		t.Fatalf("expected silent runner exit to avoid duplicate stderr, got %q", stderr.String())
+	}
+}
+
+func TestRunReturnsLockAcquireFailure(t *testing.T) {
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	recorder := &runRecorder{}
+	lock := &fakeLock{acquireErr: errors.New("lock busy")}
+
+	exitCode := run([]string{"--implementer", "codex", "--reviewer", "claude"}, runnerConfig{
+		stdin:           strings.NewReader("task"),
+		stdout:          &stdout,
+		stderr:          &stderr,
+		lock:            lock,
+		getenv:          func(string) string { return "" },
+		validateBackend: func(string) error { return nil },
+		run:             recorder.run,
+	})
+
+	if exitCode != 1 {
+		t.Fatalf("expected exit code 1, got %d", exitCode)
+	}
+	if !strings.Contains(stderr.String(), "lock busy") {
+		t.Fatalf("stderr %q did not contain lock error", stderr.String())
+	}
+	if len(recorder.configs) != 0 {
+		t.Fatalf("runner should not be invoked, got %d call(s)", len(recorder.configs))
+	}
+	if lock.acquireCalls != 1 || lock.releaseCalls != 0 {
+		t.Fatalf("unexpected lock calls: acquire=%d release=%d", lock.acquireCalls, lock.releaseCalls)
 	}
 }

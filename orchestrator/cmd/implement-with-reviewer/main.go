@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/Yongbeom-Kim/harness/orchestrator/internal/cli"
+	directorylock "github.com/Yongbeom-Kim/harness/orchestrator/internal/directory_lock"
 	"github.com/Yongbeom-Kim/harness/orchestrator/internal/implementwithreviewer"
 )
 
@@ -31,6 +32,7 @@ type runnerConfig struct {
 	getenv          func(string) string
 	validateBackend func(string) error
 	run             runFunc
+	lock            directorylock.Locker
 }
 
 type RunnerOption func(*runnerConfig)
@@ -62,6 +64,12 @@ func main() {
 
 func run(args []string, cfg runnerConfig) int {
 	cfg = defaultRunnerConfig(cfg)
+
+	if err := cfg.lock.Acquire(); err != nil {
+		fmt.Fprintln(cfg.stderr, err.Error())
+		return 1
+	}
+	defer cfg.lock.Release()
 
 	parsed, exitCode, ok := parseArgs(args, cfg.stderr, cfg.getenv)
 	if !ok {
@@ -171,6 +179,11 @@ func NewRunnerConfig(options ...RunnerOption) runnerConfig {
 		validateBackend: cli.ValidateBackend,
 		run:             implementwithreviewer.Run,
 	}
+	lock, err := directorylock.NewInCurrentDirectory()
+	if err != nil {
+		panic(err)
+	}
+	cfg.lock = lock
 	for _, option := range options {
 		if option != nil {
 			option(&cfg)
@@ -197,6 +210,13 @@ func defaultRunnerConfig(cfg runnerConfig) runnerConfig {
 	}
 	if cfg.run == nil {
 		cfg.run = implementwithreviewer.Run
+	}
+	if cfg.lock == nil {
+		lock, err := directorylock.NewInCurrentDirectory()
+		if err != nil {
+			panic(err)
+		}
+		cfg.lock = lock
 	}
 	return cfg
 }
@@ -234,6 +254,12 @@ func WithValidateBackend(validateBackend func(string) error) RunnerOption {
 func WithRun(run runFunc) RunnerOption {
 	return func(cfg *runnerConfig) {
 		cfg.run = run
+	}
+}
+
+func WithLock(lock directorylock.Locker) RunnerOption {
+	return func(cfg *runnerConfig) {
+		cfg.lock = lock
 	}
 }
 
