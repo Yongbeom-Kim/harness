@@ -8,6 +8,7 @@ setup:
 	ln -sfn "$(ROOT)/scripts/.agentrc" "$$HOME/.agentrc"
 
 build:
+	cd orchestrator && go build -o ../bin/codex cmd/codex/main.go
 	cd orchestrator && go build -o ../bin/implement-with-reviewer cmd/implement-with-reviewer/main.go
 
 source_zshrc:
