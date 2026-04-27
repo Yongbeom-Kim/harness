@@ -33,9 +33,17 @@ type runnerConfig struct {
 	run             runFunc
 }
 
+type RunnerOption func(*runnerConfig)
+
 type stringFlag struct {
 	value string
 	set   bool
+}
+
+type parsedArgs struct {
+	implementer   string
+	reviewer      string
+	maxIterations int
 }
 
 func (f *stringFlag) String() string {
@@ -49,21 +57,27 @@ func (f *stringFlag) Set(value string) error {
 }
 
 func main() {
-	os.Exit(run(os.Args[1:], runnerConfig{
-		stdin:           os.Stdin,
-		stdout:          os.Stdout,
-		stderr:          os.Stderr,
-		getenv:          os.Getenv,
-		validateBackend: cli.ValidateBackend,
-		run:             implementwithreviewer.Run,
-	}))
+	os.Exit(run(os.Args[1:], NewRunnerConfig()))
 }
 
 func run(args []string, cfg runnerConfig) int {
 	cfg = defaultRunnerConfig(cfg)
 
+	parsed, exitCode, ok := parseArgs(args, cfg.stderr, cfg.getenv)
+	if !ok {
+		return exitCode
+	}
+
+	return runImplementWithReviewer(cfg, parsed)
+}
+
+func parseArgs(args []string, stderr io.Writer, getenv func(string) string) (parsedArgs, int, bool) {
+	if getenv == nil {
+		getenv = os.Getenv
+	}
+
 	flagSet := flag.NewFlagSet("implement-with-reviewer", flag.ContinueOnError)
-	flagSet.SetOutput(cfg.stderr)
+	flagSet.SetOutput(stderr)
 
 	implementer := flagSet.String("implementer", "", "implementer backend")
 	reviewer := flagSet.String("reviewer", "", "reviewer backend")
@@ -72,35 +86,43 @@ func run(args []string, cfg runnerConfig) int {
 
 	if err := flagSet.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
-			return 0
+			return parsedArgs{}, 0, false
 		}
-		return 2
+		return parsedArgs{}, 2, false
 	}
 	if flagSet.NArg() != 0 {
-		fmt.Fprintf(cfg.stderr, "unexpected positional arguments: %s\n", strings.Join(flagSet.Args(), " "))
-		return 2
+		fmt.Fprintf(stderr, "unexpected positional arguments: %s\n", strings.Join(flagSet.Args(), " "))
+		return parsedArgs{}, 2, false
 	}
 
 	if *implementer == "" {
-		fmt.Fprintln(cfg.stderr, "missing required flag: --implementer")
-		return 2
+		fmt.Fprintln(stderr, "missing required flag: --implementer")
+		return parsedArgs{}, 2, false
 	}
 	if *reviewer == "" {
-		fmt.Fprintln(cfg.stderr, "missing required flag: --reviewer")
-		return 2
+		fmt.Fprintln(stderr, "missing required flag: --reviewer")
+		return parsedArgs{}, 2, false
 	}
 
-	maxIterations, err := resolveMaxIterations(maxIterationsFlag, cfg.getenv)
+	maxIterations, err := resolveMaxIterations(maxIterationsFlag, getenv)
 	if err != nil {
-		fmt.Fprintln(cfg.stderr, err.Error())
-		return 2
+		fmt.Fprintln(stderr, err.Error())
+		return parsedArgs{}, 2, false
 	}
 
-	if err := cfg.validateBackend(*implementer); err != nil {
+	return parsedArgs{
+		implementer:   *implementer,
+		reviewer:      *reviewer,
+		maxIterations: maxIterations,
+	}, 0, true
+}
+
+func runImplementWithReviewer(cfg runnerConfig, parsed parsedArgs) int {
+	if err := cfg.validateBackend(parsed.implementer); err != nil {
 		fmt.Fprintln(cfg.stderr, err.Error())
 		return 2
 	}
-	if err := cfg.validateBackend(*reviewer); err != nil {
+	if err := cfg.validateBackend(parsed.reviewer); err != nil {
 		fmt.Fprintln(cfg.stderr, err.Error())
 		return 2
 	}
@@ -116,9 +138,9 @@ func run(args []string, cfg runnerConfig) int {
 
 	err = cfg.run(context.Background(), implementwithreviewer.RunConfig{
 		Task:              task,
-		Implementer:       *implementer,
-		Reviewer:          *reviewer,
-		MaxIterations:     maxIterations,
+		Implementer:       parsed.implementer,
+		Reviewer:          parsed.reviewer,
+		MaxIterations:     parsed.maxIterations,
 		IdleTimeout:       defaultIdleTimeout,
 		Stdout:            cfg.stdout,
 		Stderr:            cfg.stderr,
@@ -138,6 +160,23 @@ func run(args []string, cfg runnerConfig) int {
 	}
 
 	return 0
+}
+
+func NewRunnerConfig(options ...RunnerOption) runnerConfig {
+	cfg := runnerConfig{
+		stdin:           os.Stdin,
+		stdout:          os.Stdout,
+		stderr:          os.Stderr,
+		getenv:          os.Getenv,
+		validateBackend: cli.ValidateBackend,
+		run:             implementwithreviewer.Run,
+	}
+	for _, option := range options {
+		if option != nil {
+			option(&cfg)
+		}
+	}
+	return cfg
 }
 
 func defaultRunnerConfig(cfg runnerConfig) runnerConfig {
@@ -160,6 +199,42 @@ func defaultRunnerConfig(cfg runnerConfig) runnerConfig {
 		cfg.run = implementwithreviewer.Run
 	}
 	return cfg
+}
+
+func WithStdin(stdin io.Reader) RunnerOption {
+	return func(cfg *runnerConfig) {
+		cfg.stdin = stdin
+	}
+}
+
+func WithStdout(stdout io.Writer) RunnerOption {
+	return func(cfg *runnerConfig) {
+		cfg.stdout = stdout
+	}
+}
+
+func WithStderr(stderr io.Writer) RunnerOption {
+	return func(cfg *runnerConfig) {
+		cfg.stderr = stderr
+	}
+}
+
+func WithGetenv(getenv func(string) string) RunnerOption {
+	return func(cfg *runnerConfig) {
+		cfg.getenv = getenv
+	}
+}
+
+func WithValidateBackend(validateBackend func(string) error) RunnerOption {
+	return func(cfg *runnerConfig) {
+		cfg.validateBackend = validateBackend
+	}
+}
+
+func WithRun(run runFunc) RunnerOption {
+	return func(cfg *runnerConfig) {
+		cfg.run = run
+	}
 }
 
 func resolveMaxIterations(flagValue stringFlag, getenv func(string) string) (int, error) {
