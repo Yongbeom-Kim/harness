@@ -103,7 +103,7 @@ func TestRunTurnWaitsForDoneAfterPromptBoundary(t *testing.T) {
 }
 
 func TestBuildSourcedLauncherPreservesAgentrcPath(t *testing.T) {
-	launcher := buildSourcedLauncher("codex", "--model", "gpt-5")
+	launcher := BuildSourcedLauncher("codex", "--model", "gpt-5")
 
 	if strings.Contains(launcher, "export PATH=") {
 		t.Fatalf("launcher should not overwrite PATH: %s", launcher)
