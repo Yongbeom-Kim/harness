@@ -1,89 +1,104 @@
 package cli
 
 import (
-	"errors"
-	"reflect"
-	"slices"
+	"io"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/Yongbeom-Kim/harness/orchestrator/internal/tmux"
 )
 
+// fakeTmuxSessionForTest is a [tmux.TmuxSessionLike] for tests that build a [persistentSession] without
+// [tmux.NewTmuxSession] (no real tmux; Close is a no-op).
+type fakeTmuxSessionForTest struct{ name string }
+
+func (f *fakeTmuxSessionForTest) Name() string         { return f.name }
+func (f *fakeTmuxSessionForTest) AttachTarget() string { return f.name }
+func (f *fakeTmuxSessionForTest) Attach(io.Reader, io.Writer, io.Writer) error {
+	return nil
+}
+func (f *fakeTmuxSessionForTest) Close() error { return nil }
+func (f *fakeTmuxSessionForTest) NewPane() (tmux.TmuxPaneLike, error) {
+	return fakeTmuxPaneForTest{}, nil
+}
+
+type fakeTmuxPaneForTest struct{}
+
+func (fakeTmuxPaneForTest) SendText(string) error    { return nil }
+func (fakeTmuxPaneForTest) Capture() (string, error) { return "", nil }
+func (fakeTmuxPaneForTest) Target() string           { return "fake" }
+
+// testPane is a [tmux.TmuxPaneLike] for [persistentSession] unit tests.
+// Before the first [testPane.SendText], [testPane.Capture] emulates a quiet prompt for [persistentSession.waitForReady].
+// After the first [testPane.SendText], it follows either a custom [testPane.runTurn] (optional) or the two-step default used by
+// [TestRunTurnWaitsForDoneAfterPromptBoundary].
+type testPane struct {
+	ready     string
+	readyUsed bool
+	numZero   int
+	maxReady  int
+
+	sent  string
+	phase int
+	// if set, all captures after the first send use this
+	runTurn func(p *testPane) string
+}
+
+func (p *testPane) SendText(text string) error {
+	if !p.readyUsed {
+		p.readyUsed = true
+	}
+	p.sent = text
+	return nil
+}
+
+func (p *testPane) Capture() (string, error) {
+	if !p.readyUsed {
+		p.numZero++
+		if p.maxReady > 0 && p.numZero > p.maxReady {
+			return "", nil
+		}
+		if p.ready != "" {
+			return p.ready, nil
+		}
+		return "> ", nil
+	}
+	if p.runTurn != nil {
+		return p.runTurn(p), nil
+	}
+	p.phase++
+	if p.phase == 1 {
+		return "> " + p.sent + "\n", nil
+	}
+	return "> " + p.sent + "\nUse Token = \"v2\"\n<promise>done</promise>\n", nil
+}
+
+func (p *testPane) Target() string { return "%0" }
+
 func TestRunTurnWaitsForDoneAfterPromptBoundary(t *testing.T) {
-	session := &persistentSession{
-		sessionName: "iwr-test-reviewer",
+	pane := &testPane{ready: "> "}
+	sess := &fakeTmuxSessionForTest{name: "iwr-test-reviewer"}
+	s := &persistentSession{
+		tmuxSession: sess,
+		pane:        pane,
+		backendName: "codex",
 		idleTimeout: time.Second,
 	}
-
 	userPrompt := "Review this draft:\npackage demo\nconst Token = \"v1\"\n<promise>done</promise>\n"
-	decoratedPrompt := session.decorateTurnPrompt(userPrompt)
-	sentPrompt := ""
-	captureCalls := 0
-	var commands [][]string
 
-	withRunCommandStub(t, func(name string, args ...string) (commandResult, error) {
-		commands = append(commands, append([]string{name}, args...))
-		if name != "tmux" {
-			t.Fatalf("unexpected command %q", name)
-		}
-
-		switch args[0] {
-		case "capture-pane":
-			if sentPrompt == "" {
-				t.Fatal("capture happened before prompt was sent")
-			}
-			captureCalls++
-			capture := "> " + sentPrompt + "\n"
-			if captureCalls > 1 {
-				capture += "Use Token = \"v2\"\n<promise>done</promise>\n"
-			}
-			return commandResult{stdout: capture}, nil
-		case "paste-buffer", "clear-history":
-			return commandResult{}, nil
-		case "send-keys":
-			return commandResult{}, nil
-		default:
-			t.Fatalf("unexpected tmux invocation: %v", args)
-			return commandResult{}, nil
-		}
-	})
-	withRunCommandWithInputStub(t, func(input string, name string, args ...string) (commandResult, error) {
-		commands = append(commands, append([]string{name}, args...))
-		if name != "tmux" {
-			t.Fatalf("unexpected command %q", name)
-		}
-		if !strings.HasSuffix(input, "\n"+decoratedPrompt) {
-			t.Fatalf("buffer input should prepend metadata and end with the decorated prompt:\nwant suffix: %q\ngot:         %q", "\n"+decoratedPrompt, input)
-		}
-		if len(args) != 4 || args[0] != "load-buffer" || args[1] != "-b" || args[3] != "-" {
-			t.Fatalf("unexpected tmux invocation: %v", args)
-		}
-		sentPrompt = input
-		return commandResult{}, nil
-	})
-
-	result, err := session.RunTurn(userPrompt)
+	result, err := s.RunTurn(userPrompt)
 	if err != nil {
-		t.Fatalf("RunTurn returned error: %v", err)
+		t.Fatalf("RunTurn: %v", err)
 	}
-
-	wantOutput := "Use Token = \"v2\"\n<promise>done</promise>\n"
-	if result.Output != wantOutput {
-		t.Fatalf("unexpected output:\nwant: %q\ngot:  %q", wantOutput, result.Output)
+	wantOut := "Use Token = \"v2\"\n<promise>done</promise>\n"
+	if result.Output != wantOut {
+		t.Fatalf("output: want %q got %q", wantOut, result.Output)
 	}
-
-	wantRawCapture := decoratedPrompt + "\nUse Token = \"v2\"\n<promise>done</promise>\n"
-	if result.RawCapture != wantRawCapture {
-		t.Fatalf("unexpected raw capture:\nwant: %q\ngot:  %q", wantRawCapture, result.RawCapture)
-	}
-
-	wantTail := [][]string{
-		{"tmux", "send-keys", "-t", session.sessionName, "-R"},
-		{"tmux", "clear-history", "-t", session.sessionName},
-	}
-	gotTail := commands[len(commands)-2:]
-	if !reflect.DeepEqual(gotTail, wantTail) {
-		t.Fatalf("unexpected reset commands:\nwant: %v\ngot:  %v", wantTail, gotTail)
+	decorated := s.decorateTurnPrompt(userPrompt)
+	wantRaw := decorated + "\nUse Token = \"v2\"\n<promise>done</promise>\n"
+	if result.RawCapture != wantRaw {
+		t.Fatalf("raw: want %q got %q", wantRaw, result.RawCapture)
 	}
 }
 
@@ -104,150 +119,57 @@ func TestBuildSourcedLauncherPreservesAgentrcPath(t *testing.T) {
 	}
 }
 
-func TestStartNormalizesResetFailureToStartup(t *testing.T) {
-	session := &persistentSession{
-		sessionName:        "iwr-test-implementer",
+func TestStartSucceedsWithoutReset(t *testing.T) {
+	calls := 0
+	pane := &testPane{ready: "> "}
+	pane.runTurn = func(p *testPane) string {
+		calls++
+		if calls == 1 {
+			return "> " + p.sent + "\n"
+		}
+		return "> " + p.sent + "\nready\n<promise>done</promise>\n"
+	}
+
+	sess := &fakeTmuxSessionForTest{name: "iwr-test-implementer"}
+	s := &persistentSession{
+		tmuxSession:        sess,
+		pane:               pane,
+		backendName:        "codex",
 		idleTimeout:        time.Second,
 		startupInstruction: "Acknowledge initialization.",
+		readyMatcher:       func(string) bool { return true },
 	}
-
 	rolePrompt := "You are the implementer."
-	decoratedPrompt := session.decorateStartupPrompt(rolePrompt)
-	promptSent := false
-	sentPrompt := ""
-
-	withRunCommandStub(t, func(name string, args ...string) (commandResult, error) {
-		if name != "tmux" {
-			t.Fatalf("unexpected command %q", name)
-		}
-
-		switch args[0] {
-		case "capture-pane":
-			if !promptSent {
-				return commandResult{stdout: "> "}, nil
-			}
-			return commandResult{stdout: "> " + sentPrompt + "\nready\n<promise>done</promise>\n"}, nil
-		case "paste-buffer", "clear-history":
-			return commandResult{}, nil
-		case "send-keys":
-			if slices.Contains(args, "-R") {
-				return commandResult{}, errors.New("reset failed")
-			}
-			return commandResult{}, nil
-		default:
-			t.Fatalf("unexpected tmux invocation: %v", args)
-			return commandResult{}, nil
-		}
-	})
-	withRunCommandWithInputStub(t, func(input string, name string, args ...string) (commandResult, error) {
-		if name != "tmux" {
-			t.Fatalf("unexpected command %q", name)
-		}
-		if !strings.HasSuffix(input, "\n"+decoratedPrompt) {
-			t.Fatalf("buffer input should prepend metadata and end with the decorated prompt:\nwant suffix: %q\ngot:         %q", "\n"+decoratedPrompt, input)
-		}
-		if len(args) != 4 || args[0] != "load-buffer" || args[1] != "-b" || args[3] != "-" {
-			t.Fatalf("unexpected tmux invocation: %v", args)
-		}
-		promptSent = true
-		sentPrompt = input
-		return commandResult{}, nil
-	})
-
-	err := session.Start(rolePrompt)
-	sessionErr, ok := AsSessionError(err)
-	if !ok {
-		t.Fatalf("expected session error, got %v", err)
-	}
-	if sessionErr.Kind() != SessionErrorKindStartup {
-		t.Fatalf("expected startup error kind, got %q", sessionErr.Kind())
+	decoratedPrompt := s.decorateStartupPrompt(rolePrompt)
+	if decoratedPrompt == "" {
+		t.Fatal("expected decorated prompt")
 	}
 
-	wantCapture := decoratedPrompt + "\nready\n<promise>done</promise>\n"
-	if sessionErr.Capture() != wantCapture {
-		t.Fatalf("unexpected startup capture:\nwant: %q\ngot:  %q", wantCapture, sessionErr.Capture())
+	if err := s.Start(rolePrompt); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	if !strings.Contains(pane.sent, decoratedPrompt) {
+		t.Fatalf("sent prompt should contain decorated startup prompt: %q", pane.sent)
 	}
 }
 
-func TestCloseSucceedsWhenSessionAlreadyGone(t *testing.T) {
-	tests := []struct {
-		name     string
-		hasErr   error
-		killErr  error
-		wantKill bool
-	}{
-		{
-			name:   "has-session no server running",
-			hasErr: errors.New("exit status 1: no server running on /tmp/tmux-1000/default"),
-		},
-		{
-			name:     "kill-session server exited unexpectedly",
-			wantKill: true,
-			killErr:  errors.New("exit status 1: server exited unexpectedly"),
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			session := &persistentSession{sessionName: "iwr-test-reviewer"}
-			var commands [][]string
-
-			withRunCommandStub(t, func(name string, args ...string) (commandResult, error) {
-				commands = append(commands, append([]string{name}, args...))
-				if name != "tmux" {
-					t.Fatalf("unexpected command %q", name)
-				}
-
-				switch args[0] {
-				case "has-session":
-					if tt.hasErr != nil {
-						return commandResult{}, tt.hasErr
-					}
-					return commandResult{}, nil
-				case "kill-session":
-					if !tt.wantKill {
-						t.Fatal("unexpected kill-session call")
-					}
-					if tt.killErr != nil {
-						return commandResult{}, tt.killErr
-					}
-					return commandResult{}, nil
-				default:
-					t.Fatalf("unexpected tmux invocation: %v", args)
-					return commandResult{}, nil
-				}
-			})
-
-			if err := session.Close(); err != nil {
-				t.Fatalf("Close returned error: %v", err)
-			}
-
-			if tt.wantKill && len(commands) != 2 {
-				t.Fatalf("expected has-session and kill-session, got %v", commands)
-			}
-			if !tt.wantKill && len(commands) != 1 {
-				t.Fatalf("expected only has-session, got %v", commands)
-			}
-		})
+func TestSessionNameIsOwningTmuxSessionName(t *testing.T) {
+	const want = "iwr-test-runid-implementer"
+	sess := &fakeTmuxSessionForTest{name: want}
+	s := &persistentSession{tmuxSession: sess, pane: &testPane{ready: "> "}}
+	if s.SessionName() != want {
+		t.Fatalf("SessionName: want %q got %q", want, s.SessionName())
 	}
 }
 
-func withRunCommandStub(t *testing.T, stub func(name string, args ...string) (commandResult, error)) {
-	t.Helper()
-
-	original := runCommand
-	runCommand = stub
-	t.Cleanup(func() {
-		runCommand = original
-	})
-}
-
-func withRunCommandWithInputStub(t *testing.T, stub func(input string, name string, args ...string) (commandResult, error)) {
-	t.Helper()
-
-	original := runCommandWithInput
-	runCommandWithInput = stub
-	t.Cleanup(func() {
-		runCommandWithInput = original
-	})
+func TestCloseIsIdempotentForTestSession(t *testing.T) {
+	pane := &testPane{ready: "> "}
+	sess := &fakeTmuxSessionForTest{name: "iwr-gone"}
+	s := &persistentSession{tmuxSession: sess, pane: pane, backendName: "x"}
+	if err := s.Close(); err != nil {
+		t.Fatalf("first Close: %v", err)
+	}
+	if err := s.Close(); err != nil {
+		t.Fatalf("second Close: %v", err)
+	}
 }

@@ -1,12 +1,11 @@
 package cli
 
 import (
-	"bytes"
-	"context"
 	"fmt"
-	"os/exec"
 	"strings"
 	"time"
+
+	"github.com/Yongbeom-Kim/harness/orchestrator/internal/tmux"
 )
 
 const (
@@ -14,63 +13,70 @@ const (
 	defaultIdleTimeout    = 120 * time.Second
 	startupReadyTimeout   = 30 * time.Second
 	startupQuietPeriod    = 1500 * time.Millisecond
-	commandTimeout        = 10 * time.Second
 	capturePollInterval   = 250 * time.Millisecond
-	// tmux capture-pane -S uses negative values to address scrollback history.
-	// Start far enough back to capture the full current turn from pane history.
-	captureHistoryStart = "-32768"
-)
-
-var (
-	execCommand         = exec.CommandContext
-	runCommand          = defaultRunCommand
-	runCommandWithInput = defaultRunCommandWithInput
 )
 
 type persistentSession struct {
 	backendName        string
-	sessionName        string
+	tmuxSession        tmux.TmuxSessionLike
+	pane               tmux.TmuxPaneLike
 	idleTimeout        time.Duration
 	startupInstruction string
-	launchCommand      string
 	readyMatcher       func(string) bool
-	skipPaneReset      bool
 	closed             bool
 }
 
-func newPersistentSession(backendName string, command string, args []string, startupInstruction string, readyMatcher func(string) bool, skipPaneReset bool, opts SessionOptions) (Session, error) {
+func newPersistentSession(
+	backendName string,
+	launchCommand string,
+	startupInstruction string,
+	readyMatcher func(string) bool,
+	opts SessionOptions,
+) (Session, error) {
 	sessionName := sessionNameFor(opts.RunID, opts.Role)
-	session := &persistentSession{
+	p := &persistentSession{
 		backendName:        backendName,
-		sessionName:        sessionName,
 		idleTimeout:        opts.IdleTimeout,
 		startupInstruction: startupInstruction,
-		launchCommand:      buildSourcedLauncher(command, args...),
 		readyMatcher:       readyMatcher,
-		skipPaneReset:      skipPaneReset,
 	}
-	if session.idleTimeout <= 0 {
-		session.idleTimeout = defaultIdleTimeout
+	if p.idleTimeout <= 0 {
+		p.idleTimeout = defaultIdleTimeout
 	}
-	if err := session.createTmuxSession(); err != nil {
-		return nil, NewSessionError(SessionErrorKindLaunch, session.sessionName, "", err)
+
+	sess, err := tmux.NewTmuxSession(sessionName)
+	if err != nil {
+		return nil, NewRunnerError(RunnerErrorKindLaunch, sessionName, "", err)
 	}
-	return session, nil
+	pane, err := sess.NewPane()
+	if err != nil {
+		_ = sess.Close()
+		return nil, NewRunnerError(RunnerErrorKindLaunch, sessionName, "", err)
+	}
+	if launchCommand != "" {
+		if err := pane.SendText(launchCommand); err != nil {
+			_ = sess.Close()
+			return nil, NewRunnerError(RunnerErrorKindLaunch, sessionName, "", err)
+		}
+	}
+	p.tmuxSession = sess
+	p.pane = pane
+	return p, nil
+}
+
+func (s *persistentSession) name() string {
+	if s == nil || s.tmuxSession == nil {
+		return ""
+	}
+	return s.tmuxSession.Name()
 }
 
 func (s *persistentSession) Start(rolePrompt string) error {
 	if err := s.waitForReady(); err != nil {
 		return s.normalizeStartupError(err)
 	}
-	result, err := s.runPrompt(s.decorateStartupPrompt(rolePrompt))
-	if err != nil {
+	if _, err := s.runPrompt(s.decorateStartupPrompt(rolePrompt)); err != nil {
 		return s.normalizeStartupError(err)
-	}
-	if s.skipPaneReset {
-		return nil
-	}
-	if err := s.resetPane(); err != nil {
-		return s.normalizeStartupError(NewSessionError(SessionErrorKindCapture, s.sessionName, result.RawCapture, err))
 	}
 	return nil
 }
@@ -82,9 +88,9 @@ func (s *persistentSession) waitForReady() error {
 	firstCapture := true
 
 	for {
-		capture, err := s.capturePane()
+		capture, err := s.pane.Capture()
 		if err != nil {
-			return NewSessionError(SessionErrorKindCapture, s.sessionName, lastCapture, err)
+			return NewRunnerError(RunnerErrorKindCapture, s.name(), lastCapture, err)
 		}
 
 		if firstCapture || capture != lastCapture {
@@ -102,7 +108,7 @@ func (s *persistentSession) waitForReady() error {
 		}
 
 		if time.Now().After(deadline) {
-			return NewSessionError(SessionErrorKindStartup, s.sessionName, lastCapture, fmt.Errorf("session did not become ready for startup prompt within %s", startupReadyTimeout))
+			return NewRunnerError(RunnerErrorKindStartup, s.name(), lastCapture, fmt.Errorf("session did not become ready for startup prompt within %s", startupReadyTimeout))
 		}
 
 		time.Sleep(capturePollInterval)
@@ -110,21 +116,11 @@ func (s *persistentSession) waitForReady() error {
 }
 
 func (s *persistentSession) RunTurn(prompt string) (TurnResult, error) {
-	result, err := s.runPrompt(s.decorateTurnPrompt(prompt))
-	if err != nil {
-		return TurnResult{}, err
-	}
-	if s.skipPaneReset {
-		return result, nil
-	}
-	if err := s.resetPane(); err != nil {
-		return TurnResult{}, NewSessionError(SessionErrorKindCapture, s.sessionName, result.RawCapture, err)
-	}
-	return result, nil
+	return s.runPrompt(s.decorateTurnPrompt(prompt))
 }
 
 func (s *persistentSession) SessionName() string {
-	return s.sessionName
+	return s.name()
 }
 
 func (s *persistentSession) Close() error {
@@ -133,37 +129,13 @@ func (s *persistentSession) Close() error {
 	}
 	s.closed = true
 
-	exists, err := s.hasSession()
-	if err != nil {
-		return NewSessionError(SessionErrorKindClose, s.sessionName, "", err)
-	}
-	if !exists {
+	if s.tmuxSession == nil {
 		return nil
 	}
-
-	if _, err := runCommand("tmux", "kill-session", "-t", s.sessionName); err != nil {
-		if isTmuxSessionAbsentError(err) {
-			return nil
-		}
-		return NewSessionError(SessionErrorKindClose, s.sessionName, "", err)
+	if err := s.tmuxSession.Close(); err != nil {
+		return NewRunnerError(RunnerErrorKindClose, s.name(), "", err)
 	}
 	return nil
-}
-
-func (s *persistentSession) createTmuxSession() error {
-	_, err := runCommand("tmux", "new-session", "-d", "-s", s.sessionName, s.launchCommand)
-	return err
-}
-
-func (s *persistentSession) hasSession() (bool, error) {
-	_, err := runCommand("tmux", "has-session", "-t", s.sessionName)
-	if err == nil {
-		return true, nil
-	}
-	if isTmuxSessionAbsentError(err) {
-		return false, nil
-	}
-	return false, err
 }
 
 func (s *persistentSession) normalizeStartupError(err error) error {
@@ -172,17 +144,17 @@ func (s *persistentSession) normalizeStartupError(err error) error {
 	}
 
 	capture := ""
-	if sessionErr, ok := AsSessionError(err); ok {
-		if sessionErr.Kind() == SessionErrorKindStartup {
+	if sessionErr, ok := AsRunnerError(err); ok {
+		if sessionErr.Kind() == RunnerErrorKindStartup {
 			return err
 		}
 		capture = sessionErr.Capture()
-		if sessionErr.Kind() == SessionErrorKindTimeout {
-			return NewSessionError(SessionErrorKindStartup, s.sessionName, capture, fmt.Errorf("startup acknowledgement timed out: %w", err))
+		if sessionErr.Kind() == RunnerErrorKindTimeout {
+			return NewRunnerError(RunnerErrorKindStartup, s.name(), capture, fmt.Errorf("startup acknowledgement timed out: %w", err))
 		}
 	}
 
-	return NewSessionError(SessionErrorKindStartup, s.sessionName, capture, err)
+	return NewRunnerError(RunnerErrorKindStartup, s.name(), capture, err)
 }
 
 func (s *persistentSession) decorateStartupPrompt(rolePrompt string) string {
@@ -201,32 +173,20 @@ func (s *persistentSession) runPrompt(prompt string) (TurnResult, error) {
 	turnMarker := s.nextTurnMarker()
 	markedPrompt := prependTurnMarker(prompt, turnMarker)
 
-	if err := s.sendPrompt(markedPrompt); err != nil {
-		return TurnResult{}, NewSessionError(SessionErrorKindCapture, s.sessionName, "", err)
+	if err := s.pane.SendText(markedPrompt); err != nil {
+		return TurnResult{}, NewRunnerError(RunnerErrorKindCapture, s.name(), "", err)
 	}
 
 	rawCapture, err := s.waitForDone(turnMarker)
 	if err != nil {
 		return TurnResult{}, err
 	}
+	// RawCapture is the turn slice after the iwr turn marker in pane text, not the full
+	// capture-pane buffer. tmux.TmuxPaneLike.Capture() still returns the raw pane per poll.
 	return TurnResult{
 		Output:     sanitizeTurnCapture(rawCapture),
 		RawCapture: rawCapture,
 	}, nil
-}
-
-func (s *persistentSession) sendPrompt(prompt string) error {
-	bufferName := fmt.Sprintf("%s-%d", s.sessionName, time.Now().UnixNano())
-	if _, err := runCommandWithInput(prompt, "tmux", "load-buffer", "-b", bufferName, "-"); err != nil {
-		return err
-	}
-	if _, err := runCommand("tmux", "paste-buffer", "-d", "-p", "-b", bufferName, "-t", s.sessionName); err != nil {
-		return err
-	}
-	if _, err := runCommand("tmux", "send-keys", "-t", s.sessionName, "Enter"); err != nil {
-		return err
-	}
-	return nil
 }
 
 func (s *persistentSession) waitForDone(turnMarker string) (string, error) {
@@ -234,9 +194,9 @@ func (s *persistentSession) waitForDone(turnMarker string) (string, error) {
 	lastChange := time.Now()
 
 	for {
-		capture, err := s.capturePane()
+		capture, err := s.pane.Capture()
 		if err != nil {
-			return "", NewSessionError(SessionErrorKindCapture, s.sessionName, lastTurnCapture, err)
+			return "", NewRunnerError(RunnerErrorKindCapture, s.name(), lastTurnCapture, err)
 		}
 
 		turnCapture := extractTurnCapture(capture, turnMarker)
@@ -250,83 +210,19 @@ func (s *persistentSession) waitForDone(turnMarker string) (string, error) {
 		}
 
 		if time.Since(lastChange) >= s.idleTimeout {
-			return "", NewSessionError(SessionErrorKindTimeout, s.sessionName, turnCapture, fmt.Errorf("session %s timed out waiting for completion marker", s.sessionName))
+			return "", NewRunnerError(RunnerErrorKindTimeout, s.name(), turnCapture, fmt.Errorf("session %s timed out waiting for completion marker", s.name()))
 		}
 
 		time.Sleep(capturePollInterval)
 	}
 }
 
-func (s *persistentSession) capturePane() (string, error) {
-	result, err := runCommand("tmux", "capture-pane", "-p", "-J", "-S", captureHistoryStart, "-t", s.sessionName)
-	if err != nil {
-		return "", err
-	}
-	return result.stdout, nil
-}
-
-func (s *persistentSession) resetPane() error {
-	if _, err := runCommand("tmux", "send-keys", "-t", s.sessionName, "-R"); err != nil {
-		return err
-	}
-	// TODO: clean-history is probably not the cleanest way to do this, and hurts interactivity.
-	// We can instead save a snapshot and diff the output (or just even count the lines delimited by "\n")
-	if _, err := runCommand("tmux", "clear-history", "-t", s.sessionName); err != nil {
-		return err
-	}
-	return nil
-}
-
-type commandResult struct {
-	stdout string
-	stderr string
-}
-
-func defaultRunCommand(name string, args ...string) (commandResult, error) {
-	return defaultRunCommandWithInput("", name, args...)
-}
-
-func defaultRunCommandWithInput(input string, name string, args ...string) (commandResult, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), commandTimeout)
-	defer cancel()
-
-	cmd := execCommand(ctx, name, args...)
-	var stdout bytes.Buffer
-	var stderr bytes.Buffer
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
-	if input != "" {
-		cmd.Stdin = strings.NewReader(input)
-	}
-	err := cmd.Run()
-
-	result := commandResult{
-		stdout: stdout.String(),
-		stderr: stderr.String(),
-	}
-
-	if ctx.Err() != nil {
-		return result, fmt.Errorf("%s %s timed out: %w", name, strings.Join(args, " "), ctx.Err())
-	}
-	if err != nil {
-		detail := strings.TrimSpace(result.stderr)
-		if detail != "" {
-			return result, fmt.Errorf("%w: %s", err, detail)
-		}
-		return result, err
-	}
-
-	return result, nil
-}
-
-func buildSourcedLauncher(command string, args ...string) string {
+func BuildSourcedLauncher(command string, args ...string) string {
 	quotedCommand := make([]string, 0, 1+len(args))
 	quotedCommand = append(quotedCommand, shellQuote(command))
 	for _, arg := range args {
 		quotedCommand = append(quotedCommand, shellQuote(arg))
 	}
-	// Run through the sourced shell so shell functions from .agentrc (for example
-	// backend wrappers) participate in command lookup. `exec` would bypass them.
 	script := `if [ -f "$HOME/.agentrc" ]; then . "$HOME/.agentrc"; fi; stty -echo; ` + strings.Join(quotedCommand, " ")
 	return "bash -lc " + shellQuote(script)
 }
@@ -337,17 +233,6 @@ func shellQuote(value string) string {
 
 func sessionNameFor(runID string, role string) string {
 	return fmt.Sprintf("iwr-%s-%s", runID, role)
-}
-
-func isTmuxSessionAbsentError(err error) bool {
-	if err == nil {
-		return false
-	}
-
-	message := strings.ToLower(err.Error())
-	return strings.Contains(message, "can't find session") ||
-		strings.Contains(message, "no server running") ||
-		strings.Contains(message, "server exited unexpectedly")
 }
 
 func hasExactLine(text string, target string) bool {

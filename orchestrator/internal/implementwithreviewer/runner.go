@@ -308,7 +308,7 @@ func (r *runner) writeFailureCapture(iteration int, role string, err error) erro
 	if r.artifacts == nil {
 		return nil
 	}
-	sessionErr, ok := cli.AsSessionError(err)
+	sessionErr, ok := cli.AsRunnerError(err)
 	if !ok || sessionErr.Capture() == "" {
 		return nil
 	}

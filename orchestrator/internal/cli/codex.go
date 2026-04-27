@@ -5,8 +5,7 @@ import "strings"
 func NewCodexSession(opts SessionOptions) (Session, error) {
 	return newPersistentSession(
 		"codex",
-		"codex",
-		nil,
+		BuildSourcedLauncher("codex"),
 		"You are running inside a persistent Codex tmux session. Reply with exactly Ready. Do not use tools or inspect files. Wait for the next task.",
 		func(capture string) bool {
 			if strings.Contains(capture, "Sign in with ChatGPT") ||
@@ -20,7 +19,6 @@ func NewCodexSession(opts SessionOptions) (Session, error) {
 
 			return strings.Contains(capture, "Welcome to Codex") && strings.Contains(capture, "\n› ")
 		},
-		true,
 		opts,
 	)
 }

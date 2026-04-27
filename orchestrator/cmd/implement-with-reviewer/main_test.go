@@ -187,6 +187,27 @@ func TestRunReadTaskErrorExitsOne(t *testing.T) {
 	}
 }
 
+func TestRunSetsNewSession(t *testing.T) {
+	recorder := &runRecorder{}
+	exitCode := run([]string{"--implementer", "codex", "--reviewer", "claude"}, runnerConfig{
+		stdin:           strings.NewReader("task"),
+		stdout:          &bytes.Buffer{},
+		stderr:          &bytes.Buffer{},
+		getenv:          func(string) string { return "" },
+		validateBackend: func(string) error { return nil },
+		run:             recorder.run,
+	})
+	if exitCode != 0 {
+		t.Fatalf("unexpected exit code: %d", exitCode)
+	}
+	if len(recorder.configs) < 1 {
+		t.Fatal("expected runner to be invoked")
+	}
+	if recorder.configs[0].NewSession == nil {
+		t.Fatal("expected NewSession closure")
+	}
+}
+
 func TestRunMaxIterationPrecedenceAndRunnerConfig(t *testing.T) {
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
@@ -223,7 +244,7 @@ func TestRunMaxIterationPrecedenceAndRunnerConfig(t *testing.T) {
 	if cfg.MaxIterations != 1 {
 		t.Fatalf("expected flag to override env max iterations, got %d", cfg.MaxIterations)
 	}
-	if cfg.IdleTimeout != 120*time.Second {
+	if cfg.IdleTimeout != 30*time.Minute {
 		t.Fatalf("unexpected idle timeout: %s", cfg.IdleTimeout)
 	}
 	if stdout.String() != "" || stderr.String() != "" {

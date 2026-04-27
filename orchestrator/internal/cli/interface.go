@@ -7,11 +7,11 @@ import (
 )
 
 const (
-	SessionErrorKindLaunch  = "launch"
-	SessionErrorKindStartup = "startup"
-	SessionErrorKindTimeout = "timeout"
-	SessionErrorKindCapture = "capture"
-	SessionErrorKindClose   = "close"
+	RunnerErrorKindLaunch  = "launch"
+	RunnerErrorKindStartup = "startup"
+	RunnerErrorKindTimeout = "timeout"
+	RunnerErrorKindCapture = "capture"
+	RunnerErrorKindClose   = "close"
 )
 
 type Session interface {
@@ -32,25 +32,25 @@ type TurnResult struct {
 	RawCapture string
 }
 
-type SessionError interface {
+type RunnerError interface {
 	error
 	Kind() string
 	Capture() string
 	SessionName() string
 }
 
-type sessionError struct {
+type runnerError struct {
 	kind        string
 	capture     string
 	sessionName string
 	err         error
 }
 
-func NewSessionError(kind string, sessionName string, capture string, err error) error {
+func NewRunnerError(kind string, sessionName string, capture string, err error) error {
 	if err == nil {
-		err = errors.New("session error")
+		err = errors.New("runner error")
 	}
-	return &sessionError{
+	return &runnerError{
 		kind:        kind,
 		capture:     capture,
 		sessionName: sessionName,
@@ -58,18 +58,18 @@ func NewSessionError(kind string, sessionName string, capture string, err error)
 	}
 }
 
-func AsSessionError(err error) (SessionError, bool) {
+func AsRunnerError(err error) (RunnerError, bool) {
 	if err == nil {
 		return nil, false
 	}
-	var sessionErr SessionError
-	if errors.As(err, &sessionErr) {
-		return sessionErr, true
+	var runnerErr RunnerError
+	if errors.As(err, &runnerErr) {
+		return runnerErr, true
 	}
 	return nil, false
 }
 
-func (e *sessionError) Error() string {
+func (e *runnerError) Error() string {
 	switch {
 	case e.sessionName == "" && e.kind == "":
 		return e.err.Error()
@@ -82,18 +82,18 @@ func (e *sessionError) Error() string {
 	}
 }
 
-func (e *sessionError) Unwrap() error {
+func (e *runnerError) Unwrap() error {
 	return e.err
 }
 
-func (e *sessionError) Kind() string {
+func (e *runnerError) Kind() string {
 	return e.kind
 }
 
-func (e *sessionError) Capture() string {
+func (e *runnerError) Capture() string {
 	return e.capture
 }
 
-func (e *sessionError) SessionName() string {
+func (e *runnerError) SessionName() string {
 	return e.sessionName
 }

@@ -143,7 +143,7 @@ func TestRunStartupFailureDoesNotPrintStartupTranscript(t *testing.T) {
 	implementer := &fakeSession{
 		name:     "iwr-run-id-implementer",
 		role:     RoleImplementer,
-		startErr: cli.NewSessionError(cli.SessionErrorKindStartup, "iwr-run-id-implementer", "startup hidden\n<promise>done</promise>\n", errors.New("backend failed")),
+		startErr: cli.NewRunnerError(cli.RunnerErrorKindStartup, "iwr-run-id-implementer", "startup hidden\n<promise>done</promise>\n", errors.New("backend failed")),
 	}
 	reviewer := &fakeSession{
 		name: "iwr-run-id-reviewer",
@@ -373,7 +373,7 @@ func TestRunFailsWhenCleanupFailsAfterApproval(t *testing.T) {
 	implementer := &fakeSession{
 		name:     "iwr-run-id-implementer",
 		role:     RoleImplementer,
-		closeErr: cli.NewSessionError(cli.SessionErrorKindClose, "iwr-run-id-implementer", "", errors.New("kill-session failed")),
+		closeErr: cli.NewRunnerError(cli.RunnerErrorKindClose, "iwr-run-id-implementer", "", errors.New("kill-session failed")),
 		turns: []scriptedTurn{
 			{result: cli.TurnResult{Output: "impl\n<promise>done</promise>\n", RawCapture: "impl\n<promise>done</promise>\n"}},
 		},
@@ -424,7 +424,7 @@ func TestRunWritesTimeoutCaptureAndFails(t *testing.T) {
 		name: "iwr-run-id-reviewer",
 		role: RoleReviewer,
 		turns: []scriptedTurn{
-			{err: cli.NewSessionError(cli.SessionErrorKindTimeout, "iwr-run-id-reviewer", "reviewer-stalled\n", errors.New("idle timeout"))},
+			{err: cli.NewRunnerError(cli.RunnerErrorKindTimeout, "iwr-run-id-reviewer", "reviewer-stalled\n", errors.New("idle timeout"))},
 		},
 	}
 
