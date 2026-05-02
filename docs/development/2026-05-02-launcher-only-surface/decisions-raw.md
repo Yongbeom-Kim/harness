@@ -54,3 +54,58 @@ User response:
 
 - Q5 = A
 - Confirmed interpretation: Q2 = A
+
+## Round 2
+
+Questions asked:
+
+6. How should skills and docs that currently end in an `implement-with-reviewer` command behave after this change?
+A: Remove that execution path; they should stop at the produced spec/artifact path or describe manual next steps, without inventing a replacement orchestrator command. `(Recommended)`
+B: Replace it with a single-agent `tmux_codex --attach` command as the default implementation path.
+C: Replace it with a documented manual two-launcher flow using `tmux_codex` and `tmux_claude`.
+D: Leave those skills/docs temporarily unchanged and fix them later.
+
+7. What should happen to the older design docs and implementation specs centered on `implement-with-reviewer`?
+A: Keep them as historical records, but make the new launcher-only design the active superseding direction. `(Recommended)`
+B: Rewrite older docs in place so the history reads as if the review loop was never the main direction.
+C: Delete the older review-loop design docs/specs entirely.
+D: Leave them all active side-by-side with no explicit superseding relationship.
+
+8. After removing `implement-with-reviewer`, what is the product stance on `log/runs/`?
+A: It is no longer part of the core product contract; treat existing `log/runs/` references as historical to the removed workflow and do not redefine it for launcher-only V1. `(Recommended)`
+B: Keep `log/runs/` as a generic reserved artifact root for future workflows, even though no current binary writes it.
+C: Repurpose `log/runs/` immediately for single-agent launcher session logs.
+D: Keep the directory mentioned in docs but leave its meaning intentionally vague.
+
+9. For `tmux_codex` and `tmux_claude`, is this design meant to preserve their current behavior and flags?
+A: Yes. Preserve their current launcher contracts; this design is about removing other binaries and narrowing the product surface, not redesigning launcher behavior. `(Recommended)`
+B: No. Use this design to add prompt/task flags to the launchers.
+C: No. Use this design to change default session names or attach behavior.
+D: No. Replace the two launchers with one generic launcher internally, even if two binary names remain.
+
+10. The repo currently tracks extra binary entrypoints like `tmux_agent`, `t_codex`, `t_claude`, `t_agent`, and `implement-with-reviewer`. What should the supported product surface say about those?
+A: Only `tmux_codex` and `tmux_claude` remain supported operator-facing binaries; remove the others from the supported surface and from tracked binary outputs. `(Recommended)`
+B: Keep the short `t_*` wrappers as supported convenience entrypoints, but remove `implement-with-reviewer` and `tmux_agent`.
+C: Keep the extra entrypoints in-repo but mark them unsupported/internal.
+D: Do not make a product-level statement about helper entrypoints yet.
+
+User response:
+
+- Q6 = A
+- Q7 = A
+- Q8 = A
+- Q9 = A
+- Q10 = A
+
+## Consolidated Decisions
+
+- The harness product surface becomes launcher-only. There is no replacement workflow binary in this design.
+- Remove `implement-with-reviewer` completely as an operator-facing binary, runtime surface, contract, and active design target.
+- Delete review-loop-specific runtime code and product contracts rather than keeping them dormant or deprecated.
+- The supported operator-facing binaries are exactly `tmux_codex` and `tmux_claude`.
+- Update active docs so the core product is persistent tmux-backed single-agent launchers; multi-agent orchestration is future work or external to the core product.
+- Skills and docs that currently end in an `implement-with-reviewer` command should stop at artifact output or manual next steps; they should not substitute an unreviewed replacement orchestrator command.
+- Older `implement-with-reviewer` design docs and implementation specs remain as historical records, but this new design supersedes them as the active direction.
+- `log/runs/` is no longer part of the active product contract after the review-loop surface is removed.
+- Preserve the current `tmux_codex` and `tmux_claude` launcher behavior and flags in this design.
+- Remove other tracked binary outputs and entrypoints such as `tmux_agent`, `t_codex`, `t_claude`, `t_agent`, and `implement-with-reviewer` from the supported product surface.

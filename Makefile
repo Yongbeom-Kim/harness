@@ -8,9 +8,11 @@ setup:
 	ln -sfn "$(ROOT)/scripts/.agentrc" "$$HOME/.agentrc"
 
 build:
+	@mkdir -p "$(ROOT)/bin"
+	rm -f "$(ROOT)/bin"/*
 	cd orchestrator && go build -o ../bin/tmux_codex ./cmd/tmux_codex
 	cd orchestrator && go build -o ../bin/tmux_claude ./cmd/tmux_claude
-	cd orchestrator && go build -o ../bin/implement-with-reviewer ./cmd/implement-with-reviewer
+	@rmdir "$(ROOT)/orchestrator/cmd/tmux_agent" 2>/dev/null || true
 
 clean:
 	rm -rf "$(ROOT)/bin"/*

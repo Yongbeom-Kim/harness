@@ -291,6 +291,6 @@ git commit -m "feat: add specific feature"
 
 After all steps, print a single copy-pasteable command for a fresh window and stop:
 
-```
-cat <implementation_spec_path> | implement-with-reviewer --implementer codex --reviewer codex
+```text
+/implement <path_to_impl_plan>
 ```

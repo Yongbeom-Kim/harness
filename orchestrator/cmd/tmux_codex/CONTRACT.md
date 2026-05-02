@@ -1,4 +1,13 @@
-# codex Product Contract
+# tmux_codex Product Contract
+
+## Product Surface
+
+The supported operator-facing harness binaries are exactly:
+
+- `tmux_codex`
+- `tmux_claude`
+
+This file documents the `tmux_codex` member of that launcher-only surface. No workflow binary or historical run artifact contract remains part of the active product surface.
 
 ## Purpose
 
