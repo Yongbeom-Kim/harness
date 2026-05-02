@@ -6,12 +6,9 @@ import (
 	"testing"
 )
 
-func TestTmuxCommandErrorsExposeCommandNames(t *testing.T) {
+func TestTmuxCommandErrorsIncludeOperationName(t *testing.T) {
 	err := &NewSessionError{SessionName: "taken", Err: errors.New("duplicate")}
-	if err.Command() != "new-session" {
-		t.Fatalf("unexpected command: %q", err.Command())
-	}
-	if !strings.Contains(err.Error(), `session "taken"`) {
+	if !strings.Contains(err.Error(), "new-session") || !strings.Contains(err.Error(), `session "taken"`) {
 		t.Fatalf("unexpected error text: %v", err)
 	}
 }

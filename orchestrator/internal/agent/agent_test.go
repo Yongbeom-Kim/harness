@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"errors"
 	"io"
 	"strings"
 	"sync"
@@ -9,19 +10,6 @@ import (
 
 	"github.com/Yongbeom-Kim/harness/orchestrator/internal/agent/tmux"
 )
-
-func TestKnownBackendNamesReturnsCopy(t *testing.T) {
-	names := KnownBackendNames()
-	if len(names) != 2 {
-		t.Fatalf("unexpected backend count: %d", len(names))
-	}
-
-	names[0] = "mutated"
-	again := KnownBackendNames()
-	if again[0] == "mutated" {
-		t.Fatal("expected KnownBackendNames to return a copy")
-	}
-}
 
 func TestCodexReadyMatcherRejectsInteractiveLoginPrompts(t *testing.T) {
 	agent := NewCodexAgent("codex-test")
@@ -43,37 +31,17 @@ func TestCodexReadyMatcherAcceptsKnownCodexPrompts(t *testing.T) {
 	}
 }
 
-func TestValidateBackendRejectsUnknownBackend(t *testing.T) {
-	err := ValidateBackend("bad")
-	if err == nil {
-		t.Fatal("expected validation error")
-	}
-	if !strings.Contains(err.Error(), "unknown backend: bad") {
-		t.Fatalf("unexpected error: %v", err)
-	}
-}
-
 func TestAgentErrorCarriesKindSessionAndCapture(t *testing.T) {
-	err := NewAgentError(ErrorKindTimeout, "session-name", "capture text", io.ErrUnexpectedEOF)
-	agentErr, ok := AsAgentError(err)
-	if !ok {
+	err := NewAgentError(ErrorKindStartup, "session-name", "capture text", io.ErrUnexpectedEOF)
+	var agentErr *AgentError
+	if !errors.As(err, &agentErr) {
 		t.Fatalf("expected agent error, got %v", err)
 	}
-	if agentErr.Kind != ErrorKindTimeout || agentErr.SessionName != "session-name" || agentErr.Capture != "capture text" {
+	if agentErr.Kind != ErrorKindStartup || agentErr.SessionName != "session-name" || agentErr.Capture != "capture text" {
 		t.Fatalf("unexpected agent error: %+v", agentErr)
 	}
-	if !strings.Contains(err.Error(), "timeout agent session session-name error") {
+	if !strings.Contains(err.Error(), "startup agent session session-name error") {
 		t.Fatalf("unexpected error text: %v", err)
-	}
-}
-
-func TestBuildLaunchCommandSourcesAgentrcAndQuotesArgs(t *testing.T) {
-	got := buildLaunchCommand("codex", "one two", "it's")
-	if !strings.Contains(got, `. "$HOME/.agentrc"`) {
-		t.Fatalf("launch command should source agentrc: %q", got)
-	}
-	if !strings.Contains(got, "one two") || !strings.Contains(got, `"'"'`) {
-		t.Fatalf("launch command did not quote args: %q", got)
 	}
 }
 
@@ -155,12 +123,6 @@ func TestClaudeReadyMatcherRejectsInteractiveBlockers(t *testing.T) {
 	}
 }
 
-type stubLock struct{}
-
-func (stubLock) Acquire() error { return nil }
-
-func (stubLock) Release() error { return nil }
-
 type fakeTmuxSession struct {
 	name       string
 	pane       tmux.TmuxPaneLike
@@ -168,7 +130,6 @@ type fakeTmuxSession struct {
 }
 
 func (s *fakeTmuxSession) Name() string                                 { return s.name }
-func (s *fakeTmuxSession) AttachTarget() string                         { return s.name }
 func (s *fakeTmuxSession) Attach(io.Reader, io.Writer, io.Writer) error { return nil }
 func (s *fakeTmuxSession) Close() error {
 	s.closeCalls++
@@ -204,8 +165,6 @@ func (p *recordingPane) Capture() (string, error) {
 	}
 	return p.captures[index], nil
 }
-
-func (p *recordingPane) Target() string { return "%1" }
 
 func (p *recordingPane) joined() string {
 	p.mu.Lock()

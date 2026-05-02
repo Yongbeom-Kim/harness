@@ -1,8 +1,8 @@
-package agent
+package shell
 
 import "strings"
 
-func buildLaunchCommand(command string, args ...string) string {
+func BuildLaunchCommand(command string, args ...string) string {
 	quotedCommand := make([]string, 0, 1+len(args))
 	quotedCommand = append(quotedCommand, shellQuote(command))
 	for _, arg := range args {

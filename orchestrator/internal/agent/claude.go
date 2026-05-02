@@ -6,6 +6,7 @@ import (
 	"sync"
 	"time"
 
+	agentshell "github.com/Yongbeom-Kim/harness/orchestrator/internal/agent/shell"
 	"github.com/Yongbeom-Kim/harness/orchestrator/internal/agent/tmux"
 )
 
@@ -52,7 +53,7 @@ func (a *ClaudeAgent) Start() error {
 		_ = session.Close()
 		return NewAgentError(ErrorKindLaunch, a.sessionName, "", err)
 	}
-	if err := pane.SendText(buildLaunchCommand(a.launchCommand)); err != nil {
+	if err := pane.SendText(agentshell.BuildLaunchCommand(a.launchCommand)); err != nil {
 		_ = session.Close()
 		return NewAgentError(ErrorKindLaunch, a.sessionName, "", err)
 	}
@@ -63,7 +64,42 @@ func (a *ClaudeAgent) Start() error {
 }
 
 func (a *ClaudeAgent) WaitUntilReady() error {
-	return waitUntilReady(a.sessionName, a.pane, a.readyMatcher, a.readyTimeout(), a.quietPeriod(), a.pollInterval())
+	if a.pane == nil {
+		return NewAgentError(ErrorKindStartup, a.sessionName, "", fmt.Errorf("agent session has not started"))
+	}
+
+	readyTimeout := a.readyTimeout()
+	quietPeriod := a.quietPeriod()
+	pollInterval := a.pollInterval()
+	deadline := time.Now().Add(readyTimeout)
+	lastCapture := ""
+	lastChange := time.Now()
+	firstCapture := true
+
+	for {
+		capture, err := a.pane.Capture()
+		if err != nil {
+			return NewAgentError(ErrorKindCapture, a.sessionName, lastCapture, err)
+		}
+		if firstCapture || capture != lastCapture {
+			lastCapture = capture
+			lastChange = time.Now()
+			firstCapture = false
+		}
+
+		ready := true
+		if a.readyMatcher != nil {
+			ready = a.readyMatcher(capture)
+		}
+		if ready && time.Since(lastChange) >= quietPeriod {
+			return nil
+		}
+		if time.Now().After(deadline) {
+			return NewAgentError(ErrorKindStartup, a.sessionName, lastCapture, fmt.Errorf("session did not become ready within %s", readyTimeout))
+		}
+
+		time.Sleep(pollInterval)
+	}
 }
 
 func (a *ClaudeAgent) SendPrompt(prompt string) error {

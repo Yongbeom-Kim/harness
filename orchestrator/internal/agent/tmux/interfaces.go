@@ -5,7 +5,6 @@ import "io"
 
 type TmuxSessionLike interface {
 	Name() string
-	AttachTarget() string
 	Attach(stdin io.Reader, stdout io.Writer, stderr io.Writer) error
 	Close() error
 	NewPane() (TmuxPaneLike, error)
@@ -14,5 +13,4 @@ type TmuxSessionLike interface {
 type TmuxPaneLike interface {
 	SendText(text string) error
 	Capture() (string, error)
-	Target() string
 }

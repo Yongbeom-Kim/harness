@@ -8,7 +8,6 @@ import (
 const (
 	ErrorKindLaunch  = "launch"
 	ErrorKindStartup = "startup"
-	ErrorKindTimeout = "timeout"
 	ErrorKindCapture = "capture"
 	ErrorKindClose   = "close"
 )
@@ -30,17 +29,6 @@ func NewAgentError(kind string, sessionName string, capture string, err error) e
 		Capture:     capture,
 		Err:         err,
 	}
-}
-
-func AsAgentError(err error) (*AgentError, bool) {
-	if err == nil {
-		return nil, false
-	}
-	var agentErr *AgentError
-	if errors.As(err, &agentErr) {
-		return agentErr, true
-	}
-	return nil, false
 }
 
 func (e *AgentError) Error() string {

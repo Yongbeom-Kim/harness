@@ -56,13 +56,6 @@ func (s *TmuxSession) Name() string {
 	return s.name
 }
 
-func (s *TmuxSession) AttachTarget() string {
-	if s == nil {
-		return ""
-	}
-	return s.name
-}
-
 func (s *TmuxSession) Attach(stdin io.Reader, stdout io.Writer, stderr io.Writer) error {
 	if s == nil {
 		return fmt.Errorf("nil TmuxSession")
@@ -200,19 +193,6 @@ func (p *TmuxPane) Capture() (string, error) {
 		return "", &CapturePaneError{Target: t, Err: err}
 	}
 	return r.stdout, nil
-}
-
-func (p *TmuxPane) Target() string {
-	if p == nil {
-		return ""
-	}
-	if p.target != "" {
-		return p.target
-	}
-	if p.session != nil {
-		return p.session.name
-	}
-	return ""
 }
 
 type commandResult struct {
