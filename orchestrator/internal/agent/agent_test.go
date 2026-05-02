@@ -5,6 +5,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
@@ -12,6 +13,17 @@ import (
 
 	"github.com/Yongbeom-Kim/harness/orchestrator/internal/agent/tmux"
 )
+
+func TestAgentInterfaceIncludesSendPrompt(t *testing.T) {
+	iface := reflect.TypeOf((*Agent)(nil)).Elem()
+	method, ok := iface.MethodByName("SendPrompt")
+	if !ok {
+		t.Fatal("expected Agent interface to expose SendPrompt")
+	}
+	if method.Type.NumIn() != 1 || method.Type.In(0).Kind() != reflect.String {
+		t.Fatalf("unexpected SendPrompt signature: %v", method.Type)
+	}
+}
 
 func TestCodexReadyMatcherRejectsInteractiveLoginPrompts(t *testing.T) {
 	agent := NewCodexAgent("codex-test")

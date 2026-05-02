@@ -1,16 +1,21 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"flag"
 	"fmt"
 	"io"
 	"os"
+	"os/signal"
 	"strings"
+	"sync"
+	"syscall"
 
 	agentpkg "github.com/Yongbeom-Kim/harness/orchestrator/internal/agent"
 	"github.com/Yongbeom-Kim/harness/orchestrator/internal/agent/tmux"
 	"github.com/Yongbeom-Kim/harness/orchestrator/internal/dirlock"
+	"github.com/Yongbeom-Kim/harness/orchestrator/internal/mkpipe"
 )
 
 const (
@@ -20,14 +25,18 @@ const (
 )
 
 type claudeLaunchArgs struct {
-	sessionName string
-	attach      bool
+	sessionName   string
+	attach        bool
+	mkpipeEnabled bool
+	mkpipePath    string
 }
 
 type claudeDeps struct {
-	newAgent    func(string) agentpkg.Agent
-	newLock     func() (dirlock.Locker, error)
-	openSession func(string) (tmux.TmuxSessionLike, error)
+	newAgent      func(string) agentpkg.Agent
+	newLock       func() (dirlock.Locker, error)
+	openSession   func(string) (tmux.TmuxSessionLike, error)
+	startMkpipe   func(mkpipe.Config) (mkpipe.Listener, error)
+	signalContext func() (context.Context, context.CancelFunc)
 }
 
 func main() {
@@ -41,6 +50,7 @@ func main() {
 		openSession: func(sessionName string) (tmux.TmuxSessionLike, error) {
 			return tmux.OpenTmuxSession(sessionName)
 		},
+		startMkpipe: mkpipe.Start,
 	}))
 }
 
@@ -85,19 +95,87 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer, deps claudeDe
 	}
 
 	if parsed.attach {
+		var listener mkpipe.Listener
+		cleanup := func() {}
+		if parsed.mkpipeEnabled {
+			if deps.startMkpipe == nil {
+				_ = agent.Close()
+				fmt.Fprintln(stderr, "claude mkpipe starter is not configured")
+				return 1
+			}
+			var err error
+			listener, err = deps.startMkpipe(mkpipe.Config{
+				SessionName:     agent.SessionName(),
+				DefaultBasename: claudeDefaultSessionName,
+				RequestedPath:   parsed.mkpipePath,
+			})
+			if err != nil {
+				_ = agent.Close()
+				fmt.Fprintln(stderr, err.Error())
+				return 1
+			}
+
+			signalContext := deps.signalContext
+			if signalContext == nil {
+				signalContext = func() (context.Context, context.CancelFunc) {
+					return signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+				}
+			}
+			ctx, stop := signalContext()
+			defer stop()
+
+			var cleanupOnce sync.Once
+			cleanup = func() {
+				cleanupOnce.Do(func() {
+					if err := listener.Close(); err != nil {
+						fmt.Fprintf(stderr, "mkpipe cleanup failed: %v\n", err)
+					}
+				})
+			}
+			go func() {
+				<-ctx.Done()
+				cleanup()
+			}()
+			go func() {
+				for prompt := range listener.Messages() {
+					if err := agent.SendPrompt(prompt); err != nil {
+						fmt.Fprintf(stderr, "mkpipe delivery failed: %v\n", err)
+					}
+				}
+			}()
+			go func() {
+				for err := range listener.Errors() {
+					fmt.Fprintf(stderr, "mkpipe listener error: %v\n", err)
+				}
+			}()
+		}
+
 		if deps.openSession == nil {
+			cleanup()
+			if parsed.mkpipeEnabled {
+				_ = agent.Close()
+			}
 			fmt.Fprintln(stderr, "claude session opener is not configured")
 			return 1
 		}
 		session, err := deps.openSession(agent.SessionName())
 		if err != nil {
+			cleanup()
+			if parsed.mkpipeEnabled {
+				_ = agent.Close()
+			}
 			fmt.Fprintln(stderr, err.Error())
 			return 1
+		}
+		if parsed.mkpipeEnabled {
+			fmt.Fprintf(stdout, "Attaching Claude tmux session %q with mkpipe %q\n", agent.SessionName(), listener.Path())
 		}
 		if err := session.Attach(stdin, stdout, stderr); err != nil {
+			cleanup()
 			fmt.Fprintln(stderr, err.Error())
 			return 1
 		}
+		cleanup()
 		return 0
 	}
 
@@ -106,13 +184,19 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer, deps claudeDe
 }
 
 func parseArgs(args []string, stderr io.Writer) (claudeLaunchArgs, int, bool) {
+	cleanArgs, mkpipeEnabled, mkpipePath, err := extractMkpipeArgs(args)
+	if err != nil {
+		fmt.Fprintln(stderr, err.Error())
+		return claudeLaunchArgs{}, 2, false
+	}
+
 	flagSet := flag.NewFlagSet(claudeProgramName, flag.ContinueOnError)
 	flagSet.SetOutput(stderr)
 
 	sessionName := flagSet.String("session", claudeDefaultSessionName, "tmux session name")
 	attach := flagSet.Bool("attach", false, "attach to the tmux session after launch")
 
-	if err := flagSet.Parse(args); err != nil {
+	if err := flagSet.Parse(cleanArgs); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
 			return claudeLaunchArgs{}, 0, false
 		}
@@ -126,9 +210,38 @@ func parseArgs(args []string, stderr io.Writer) (claudeLaunchArgs, int, bool) {
 		fmt.Fprintln(stderr, "invalid --session: must not be empty")
 		return claudeLaunchArgs{}, 2, false
 	}
+	if mkpipeEnabled && !*attach {
+		fmt.Fprintln(stderr, "invalid --mkpipe: requires --attach")
+		return claudeLaunchArgs{}, 2, false
+	}
 
 	return claudeLaunchArgs{
-		sessionName: *sessionName,
-		attach:      *attach,
+		sessionName:   *sessionName,
+		attach:        *attach,
+		mkpipeEnabled: mkpipeEnabled,
+		mkpipePath:    mkpipePath,
 	}, 0, true
+}
+
+func extractMkpipeArgs(args []string) ([]string, bool, string, error) {
+	cleanArgs := make([]string, 0, len(args))
+	mkpipeEnabled := false
+	mkpipePath := ""
+
+	for i := 0; i < len(args); i++ {
+		if args[i] != "--mkpipe" {
+			cleanArgs = append(cleanArgs, args[i])
+			continue
+		}
+		if mkpipeEnabled {
+			return nil, false, "", fmt.Errorf("invalid --mkpipe: may be provided at most once")
+		}
+		mkpipeEnabled = true
+		if i+1 < len(args) && !strings.HasPrefix(args[i+1], "-") {
+			mkpipePath = args[i+1]
+			i++
+		}
+	}
+
+	return cleanArgs, mkpipeEnabled, mkpipePath, nil
 }
