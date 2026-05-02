@@ -9,7 +9,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/Yongbeom-Kim/harness/orchestrator/internal/implementwithreviewer"
+	agentpkg "github.com/Yongbeom-Kim/harness/orchestrator/internal/agent"
+	agentsession "github.com/Yongbeom-Kim/harness/orchestrator/internal/agent/session"
+	"github.com/Yongbeom-Kim/harness/orchestrator/internal/dirlock"
+	"github.com/Yongbeom-Kim/harness/orchestrator/internal/reviewloop"
 )
 
 type panicReader struct{}
@@ -19,7 +22,7 @@ type errReader struct {
 }
 
 type runRecorder struct {
-	configs []implementwithreviewer.RunConfig
+	configs []reviewloop.RunConfig
 	err     error
 }
 
@@ -37,7 +40,7 @@ func (r errReader) Read(_ []byte) (int, error) {
 	return 0, r.err
 }
 
-func (r *runRecorder) run(_ context.Context, cfg implementwithreviewer.RunConfig) error {
+func (r *runRecorder) run(_ context.Context, cfg reviewloop.RunConfig) error {
 	r.configs = append(r.configs, cfg)
 	return r.err
 }
@@ -133,6 +136,31 @@ func TestRunHelpExitsZero(t *testing.T) {
 	}
 }
 
+func TestRunHelpDoesNotRequireLock(t *testing.T) {
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	recorder := &runRecorder{}
+
+	exitCode := run([]string{"-h"}, runnerConfig{
+		stdin:           strings.NewReader(""),
+		stdout:          &stdout,
+		stderr:          &stderr,
+		getenv:          func(string) string { return "" },
+		validateBackend: func(string) error { return nil },
+		run:             recorder.run,
+		newLock: func() (dirlock.Locker, error) {
+			return nil, errors.New("should not be called")
+		},
+	})
+
+	if exitCode != 0 {
+		t.Fatalf("expected exit code 0, got %d\nstderr:\n%s", exitCode, stderr.String())
+	}
+	if strings.Contains(stderr.String(), "should not be called") {
+		t.Fatalf("help should not try to create a lock: %q", stderr.String())
+	}
+}
+
 func TestRunRejectsInvalidBackendBeforeReadingStdin(t *testing.T) {
 	tests := []struct {
 		name     string
@@ -177,6 +205,30 @@ func TestRunRejectsInvalidBackendBeforeReadingStdin(t *testing.T) {
 	}
 }
 
+func TestValidateAgentBackendRejectsUnknownBackend(t *testing.T) {
+	err := agentpkg.ValidateBackend("bad")
+	if err == nil {
+		t.Fatal("expected validation error")
+	}
+	if !strings.Contains(err.Error(), "unknown backend: bad") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestNewAgentSessionRejectsUnknownBackend(t *testing.T) {
+	_, err := newAgentSession(agentsession.Dependencies{}, "bad", agentsession.SessionOptions{
+		RunID:       "run",
+		Role:        "implementer",
+		IdleTimeout: time.Second,
+	})
+	if err == nil {
+		t.Fatal("expected session creation error")
+	}
+	if !strings.Contains(err.Error(), "unknown backend: bad") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
 func TestRunReadTaskErrorExitsOne(t *testing.T) {
 	readErr := errors.New("read failed")
 	var stdout bytes.Buffer
@@ -216,7 +268,10 @@ func TestRunSetsNewSession(t *testing.T) {
 		lock:            &fakeLock{},
 		getenv:          func(string) string { return "" },
 		validateBackend: func(string) error { return nil },
-		run:             recorder.run,
+		newSession: func(string, reviewloop.SessionOptions) (reviewloop.Session, error) {
+			return nil, nil
+		},
+		run: recorder.run,
 	})
 	if exitCode != 0 {
 		t.Fatalf("unexpected exit code: %d", exitCode)
@@ -246,7 +301,10 @@ func TestRunMaxIterationPrecedenceAndRunnerConfig(t *testing.T) {
 			return ""
 		},
 		validateBackend: func(string) error { return nil },
-		run:             recorder.run,
+		newSession: func(string, reviewloop.SessionOptions) (reviewloop.Session, error) {
+			return nil, nil
+		},
+		run: recorder.run,
 	})
 
 	if exitCode != 0 {
@@ -278,7 +336,7 @@ func TestRunPropagatesRunnerExitCode(t *testing.T) {
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
 	recorder := &runRecorder{
-		err: implementwithreviewer.NewExitError(1, true, errors.New("already reported")),
+		err: reviewloop.NewExitError(1, true, errors.New("already reported")),
 	}
 
 	exitCode := run([]string{"--implementer", "codex", "--reviewer", "claude"}, runnerConfig{
@@ -288,7 +346,10 @@ func TestRunPropagatesRunnerExitCode(t *testing.T) {
 		lock:            &fakeLock{},
 		getenv:          func(string) string { return "" },
 		validateBackend: func(string) error { return nil },
-		run:             recorder.run,
+		newSession: func(string, reviewloop.SessionOptions) (reviewloop.Session, error) {
+			return nil, nil
+		},
+		run: recorder.run,
 	})
 
 	if exitCode != 1 {
@@ -326,5 +387,33 @@ func TestRunReturnsLockAcquireFailure(t *testing.T) {
 	}
 	if lock.acquireCalls != 1 || lock.releaseCalls != 0 {
 		t.Fatalf("unexpected lock calls: acquire=%d release=%d", lock.acquireCalls, lock.releaseCalls)
+	}
+}
+
+func TestRunReturnsLockConstructionFailure(t *testing.T) {
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	recorder := &runRecorder{}
+
+	exitCode := run([]string{"--implementer", "codex", "--reviewer", "claude"}, runnerConfig{
+		stdin:           strings.NewReader("task"),
+		stdout:          &stdout,
+		stderr:          &stderr,
+		getenv:          func(string) string { return "" },
+		validateBackend: func(string) error { return nil },
+		run:             recorder.run,
+		newLock: func() (dirlock.Locker, error) {
+			return nil, errors.New("lock init failed")
+		},
+	})
+
+	if exitCode != 1 {
+		t.Fatalf("expected exit code 1, got %d", exitCode)
+	}
+	if !strings.Contains(stderr.String(), "lock init failed") {
+		t.Fatalf("stderr %q did not contain lock construction error", stderr.String())
+	}
+	if len(recorder.configs) != 0 {
+		t.Fatalf("runner should not be invoked, got %d call(s)", len(recorder.configs))
 	}
 }

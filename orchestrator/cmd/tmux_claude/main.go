@@ -1,176 +1,21 @@
 package main
 
 import (
-	"errors"
-	"flag"
-	"fmt"
-	"io"
 	"os"
-	"strings"
 
-	"github.com/Yongbeom-Kim/harness/orchestrator/internal/cli"
-	directorylock "github.com/Yongbeom-Kim/harness/orchestrator/internal/directory_lock"
-	"github.com/Yongbeom-Kim/harness/orchestrator/internal/tmux"
+	agentpkg "github.com/Yongbeom-Kim/harness/orchestrator/internal/agent"
+	agentsession "github.com/Yongbeom-Kim/harness/orchestrator/internal/agent/session"
+	"github.com/Yongbeom-Kim/harness/orchestrator/internal/dirlock"
 )
 
-const defaultSessionName = "claude"
-
-type openSessionFunc func(string) (tmux.TmuxSessionLike, error)
-type runnerConfig struct {
-	stdin       io.Reader
-	stdout      io.Writer
-	stderr      io.Writer
-	openSession openSessionFunc
-	buildLaunch func(string, ...string) string
-	lock        directorylock.Locker
-}
-
-type RunnerOption func(*runnerConfig)
-
-type parsedArgs struct {
-	sessionName string
-	attach      bool
-}
-
 func main() {
-	os.Exit(run(os.Args[1:]))
-}
-
-func run(args []string) int {
-	return runWithConfig(args, NewRunnerConfig())
-}
-
-func runWithConfig(args []string, cfg runnerConfig) int {
-	if err := cfg.lock.Acquire(); err != nil {
-		fmt.Fprintln(cfg.stderr, err.Error())
-		return 1
-	}
-	defer cfg.lock.Release()
-
-	parsed, exitCode, ok := parseArgs(args, cfg.stderr)
-	if !ok {
-		return exitCode
-	}
-
-	return runClaude(cfg, parsed)
-}
-
-func parseArgs(args []string, stderr io.Writer) (parsedArgs, int, bool) {
-	flagSet := flag.NewFlagSet("claude", flag.ContinueOnError)
-	flagSet.SetOutput(stderr)
-
-	sessionName := flagSet.String("session", defaultSessionName, "tmux session name")
-	attach := flagSet.Bool("attach", false, "attach to the tmux session after launch")
-
-	if err := flagSet.Parse(args); err != nil {
-		if errors.Is(err, flag.ErrHelp) {
-			return parsedArgs{}, 0, false
-		}
-		return parsedArgs{}, 2, false
-	}
-	if flagSet.NArg() != 0 {
-		fmt.Fprintf(stderr, "unexpected positional arguments: %s\n", strings.Join(flagSet.Args(), " "))
-		return parsedArgs{}, 2, false
-	}
-	if strings.TrimSpace(*sessionName) == "" {
-		fmt.Fprintln(stderr, "invalid --session: must not be empty")
-		return parsedArgs{}, 2, false
-	}
-
-	return parsedArgs{
-		sessionName: *sessionName,
-		attach:      *attach,
-	}, 0, true
-}
-
-func runClaude(cfg runnerConfig, parsed parsedArgs) int {
-	session, err := cfg.openSession(parsed.sessionName)
-	if err != nil {
-		fmt.Fprintln(cfg.stderr, err.Error())
-		return 1
-	}
-
-	pane, err := session.NewPane()
-	if err != nil {
-		_ = session.Close()
-		fmt.Fprintln(cfg.stderr, err.Error())
-		return 1
-	}
-
-	if err := pane.SendText(cfg.buildLaunch("claude")); err != nil {
-		_ = session.Close()
-		fmt.Fprintln(cfg.stderr, err.Error())
-		return 1
-	}
-	if parsed.attach {
-		if err := session.Attach(cfg.stdin, cfg.stdout, cfg.stderr); err != nil {
-			fmt.Fprintln(cfg.stderr, err.Error())
-			return 1
-		}
-		return 0
-	}
-
-	fmt.Fprintf(cfg.stdout, "Launched Claude in tmux session %q\n", session.AttachTarget())
-	return 0
-}
-
-func NewRunnerConfig(options ...RunnerOption) runnerConfig {
-	cfg := runnerConfig{
-		stdin:       os.Stdin,
-		stdout:      os.Stdout,
-		stderr:      os.Stderr,
-		openSession: openTmuxSession,
-		buildLaunch: cli.BuildSourcedLauncher,
-	}
-	lock, err := directorylock.NewInCurrentDirectory()
-	if err != nil {
-		panic(err)
-	}
-	cfg.lock = lock
-	for _, option := range options {
-		if option != nil {
-			option(&cfg)
-		}
-	}
-	return cfg
-}
-
-func WithStdin(stdin io.Reader) RunnerOption {
-	return func(cfg *runnerConfig) {
-		cfg.stdin = stdin
-	}
-}
-
-func WithStdout(stdout io.Writer) RunnerOption {
-	return func(cfg *runnerConfig) {
-		cfg.stdout = stdout
-	}
-}
-
-func WithStderr(stderr io.Writer) RunnerOption {
-	return func(cfg *runnerConfig) {
-		cfg.stderr = stderr
-	}
-}
-
-func WithOpenSession(openSession openSessionFunc) RunnerOption {
-	return func(cfg *runnerConfig) {
-		cfg.openSession = openSession
-	}
-}
-
-func WithBuildLaunch(buildLaunch func(string, ...string) string) RunnerOption {
-	return func(cfg *runnerConfig) {
-		cfg.buildLaunch = buildLaunch
-	}
-}
-
-func WithLock(lock directorylock.Locker) RunnerOption {
-	return func(cfg *runnerConfig) {
-		cfg.lock = lock
-	}
-}
-
-func openTmuxSession(name string) (tmux.TmuxSessionLike, error) {
-	return tmux.NewTmuxSession(name)
+	agent := agentpkg.NewClaudeAgent(agentsession.NewSystemStandaloneDependencies())
+	os.Exit(agent.RunStandalone(os.Args[1:], agentpkg.StandaloneConfig{
+		Stdin:  os.Stdin,
+		Stdout: os.Stdout,
+		Stderr: os.Stderr,
+		NewLock: func() (agentsession.Locker, error) {
+			return dirlock.NewInCurrentDirectory()
+		},
+	}))
 }

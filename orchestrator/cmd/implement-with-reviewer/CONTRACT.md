@@ -74,6 +74,32 @@ This is an approved implementation deviation from the earlier reviewed design, w
 
 Both role sessions are created and started before the first real implementer turn runs. Startup acknowledgements are required to complete successfully, but successful startup text is not printed into the normal command transcript.
 
+### Side-channel runtime
+
+Before either role session starts, the command creates two fixed FIFOs in the current working directory:
+
+- `./to_reviewer.pipe`
+- `./to_implementer.pipe`
+
+Dedicated background readers stay attached to those FIFOs for the lifetime of the run. One FIFO open-write-close cycle is treated as one side-channel message. Non-empty message bodies are wrapped as:
+
+```text
+<side_channel_message>
+<raw body>
+</side_channel_message>
+```
+
+and injected immediately into the destination role's live tmux session.
+
+This side-channel is additive only:
+
+- it does not change the CLI surface
+- it does not change approval detection
+- it does not change iteration control or termination rules
+- it may appear inside ordinary pane captures if delivery happens during an in-flight turn
+
+If a message arrives before the destination session has completed its startup prompt, the command drops it and records `dropped_not_started`.
+
 ### Completion contract
 
 Each backend turn is instructed to finish with:
@@ -121,6 +147,15 @@ Reviewer role prompt:
 ```text
 You are a strict code reviewer. Review the implementation provided. If it is correct, complete, and handles edge cases properly, respond with exactly: <promise>APPROVED</promise> - nothing else. Otherwise respond with specific, actionable feedback only. No praise, no filler.
 ```
+
+### Side-channel capability
+
+Each role also receives startup instructions for a fixed FIFO-based side channel:
+
+- `./to_reviewer.pipe`
+- `./to_implementer.pipe`
+
+The startup prompt tells the agent which literal path it can write to in order to message the other role from its current session. One side-channel message is one writer open-write-close cycle. The agent should write the full message body and then close the writer.
 
 ### Turn prompt shapes
 
@@ -231,6 +266,7 @@ The artifact directory contains:
 
 - `metadata.json`
 - `state-transitions.jsonl`
+- `channel-events.jsonl`
 - `captures/*`
 - `result.json`
 
@@ -273,12 +309,35 @@ Failure captures use explicit suffixes when capture text is available, for examp
 
 It also records the final implementation when available and the terminal error string on failure.
 
+### Channel events
+
+`channel-events.jsonl` records side-channel activity with at least:
+
+- timestamp
+- source role
+- destination role
+- channel path
+- status
+- raw body when available
+
+Supported status values are:
+
+- `delivered`
+- `delivery_failed`
+- `dropped_empty`
+- `dropped_not_started`
+- `reader_error`
+
 ## Failure Semantics
 
 - tmux unavailability or backend launch/startup failure fails fast
+- FIFO setup failure or background FIFO reader failure fails fast
 - a timeout persists a best-effort timeout capture and writes a failed result
+- an individual side-channel delivery failure is non-fatal and is recorded as `delivery_failed`
+- an empty side-channel message is non-fatal and is recorded as `dropped_empty`
+- a side-channel message for a not-yet-started destination is non-fatal and is recorded as `dropped_not_started`
 - artifact persistence failures are terminal even if the agent logic otherwise succeeded
-- cleanup is attempted for both sessions on both success and failure
+- cleanup stops the FIFO manager before closing sessions, then removes the FIFO paths
 - if cleanup itself fails, that cleanup failure becomes the terminal failure
 
 The second approved implementation deviation from the earlier reviewed design is that tmux runtime verification is manual in v1 rather than a new checked-in integration suite.

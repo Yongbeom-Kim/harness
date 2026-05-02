@@ -11,9 +11,11 @@ import (
 	"strings"
 	"time"
 
-	"github.com/Yongbeom-Kim/harness/orchestrator/internal/cli"
-	directorylock "github.com/Yongbeom-Kim/harness/orchestrator/internal/directory_lock"
-	"github.com/Yongbeom-Kim/harness/orchestrator/internal/implementwithreviewer"
+	agentpkg "github.com/Yongbeom-Kim/harness/orchestrator/internal/agent"
+	agentsession "github.com/Yongbeom-Kim/harness/orchestrator/internal/agent/session"
+	"github.com/Yongbeom-Kim/harness/orchestrator/internal/dirlock"
+	"github.com/Yongbeom-Kim/harness/orchestrator/internal/filechannel"
+	"github.com/Yongbeom-Kim/harness/orchestrator/internal/reviewloop"
 )
 
 const (
@@ -23,19 +25,22 @@ const (
 
 var errEmptyTask = errors.New("task from stdin must not be empty")
 
-type runFunc func(context.Context, implementwithreviewer.RunConfig) error
+type runFunc func(context.Context, reviewloop.RunConfig) error
 
 type runnerConfig struct {
-	stdin           io.Reader
-	stdout          io.Writer
-	stderr          io.Writer
-	getenv          func(string) string
-	validateBackend func(string) error
-	run             runFunc
-	lock            directorylock.Locker
+	stdin                          io.Reader
+	stdout                         io.Writer
+	stderr                         io.Writer
+	getenv                         func(string) string
+	validateBackend                func(string) error
+	newSession                     func(string, reviewloop.SessionOptions) (reviewloop.Session, error)
+	newArtifactWriter              func(string) (reviewloop.ArtifactSink, error)
+	newCommunicationChannelManager func(reviewloop.ChannelConfig) (reviewloop.ChannelManager, error)
+	newRunID                       func() (string, error)
+	run                            runFunc
+	lock                           dirlock.Locker
+	newLock                        func() (dirlock.Locker, error)
 }
-
-type RunnerOption func(*runnerConfig)
 
 type stringFlag struct {
 	value string
@@ -59,22 +64,25 @@ func (f *stringFlag) Set(value string) error {
 }
 
 func main() {
-	os.Exit(run(os.Args[1:], NewRunnerConfig()))
+	os.Exit(run(os.Args[1:], newRunnerConfig()))
 }
 
 func run(args []string, cfg runnerConfig) int {
-	cfg = defaultRunnerConfig(cfg)
-
-	if err := cfg.lock.Acquire(); err != nil {
-		fmt.Fprintln(cfg.stderr, err.Error())
-		return 1
-	}
-	defer cfg.lock.Release()
-
 	parsed, exitCode, ok := parseArgs(args, cfg.stderr, cfg.getenv)
 	if !ok {
 		return exitCode
 	}
+
+	lock, err := resolveLock(cfg)
+	if err != nil {
+		fmt.Fprintln(cfg.stderr, err.Error())
+		return 1
+	}
+	if err := lock.Acquire(); err != nil {
+		fmt.Fprintln(cfg.stderr, err.Error())
+		return 1
+	}
+	defer lock.Release()
 
 	return runImplementWithReviewer(cfg, parsed)
 }
@@ -112,7 +120,13 @@ func parseArgs(args []string, stderr io.Writer, getenv func(string) string) (par
 		return parsedArgs{}, 2, false
 	}
 
-	maxIterations, err := resolveMaxIterations(maxIterationsFlag, getenv)
+	maxIterations := defaultMaxIterations
+	var err error
+	if maxIterationsFlag.set {
+		maxIterations, err = parsePositiveInt(maxIterationsFlag.value, "--max-iterations")
+	} else if envValue := getenv("MAX_ITERATIONS"); envValue != "" {
+		maxIterations, err = parsePositiveInt(envValue, "MAX_ITERATIONS")
+	}
 	if err != nil {
 		fmt.Fprintln(stderr, err.Error())
 		return parsedArgs{}, 2, false
@@ -144,20 +158,22 @@ func runImplementWithReviewer(cfg runnerConfig, parsed parsedArgs) int {
 		return 1
 	}
 
-	err = cfg.run(context.Background(), implementwithreviewer.RunConfig{
-		Task:              task,
-		Implementer:       parsed.implementer,
-		Reviewer:          parsed.reviewer,
-		MaxIterations:     parsed.maxIterations,
-		IdleTimeout:       defaultIdleTimeout,
-		Stdout:            cfg.stdout,
-		Stderr:            cfg.stderr,
-		NewSession:        cli.NewSession,
-		NewArtifactWriter: implementwithreviewer.NewArtifactWriter,
-		NewRunID:          implementwithreviewer.NewRunID,
+	err = cfg.run(context.Background(), reviewloop.RunConfig{
+		Task:                           task,
+		Implementer:                    parsed.implementer,
+		Reviewer:                       parsed.reviewer,
+		MaxIterations:                  parsed.maxIterations,
+		IdleTimeout:                    defaultIdleTimeout,
+		Stdout:                         cfg.stdout,
+		Stderr:                         cfg.stderr,
+		NewSession:                     cfg.newSession,
+		NewArtifactWriter:              cfg.newArtifactWriter,
+		NewCommunicationChannelManager: cfg.newCommunicationChannelManager,
+		NewRunID:                       cfg.newRunID,
 	})
+
 	if err != nil {
-		if exitErr, ok := implementwithreviewer.AsExitError(err); ok {
+		if exitErr, ok := reviewloop.AsExitError(err); ok {
 			if !exitErr.Silent() {
 				fmt.Fprintln(cfg.stderr, err.Error())
 			}
@@ -170,107 +186,166 @@ func runImplementWithReviewer(cfg runnerConfig, parsed parsedArgs) int {
 	return 0
 }
 
-func NewRunnerConfig(options ...RunnerOption) runnerConfig {
-	cfg := runnerConfig{
+func newRunnerConfig() runnerConfig {
+	deps := newSessionDependencies()
+	return runnerConfig{
 		stdin:           os.Stdin,
 		stdout:          os.Stdout,
 		stderr:          os.Stderr,
 		getenv:          os.Getenv,
-		validateBackend: cli.ValidateBackend,
-		run:             implementwithreviewer.Run,
+		validateBackend: agentpkg.ValidateBackend,
+		newSession: func(name string, opts reviewloop.SessionOptions) (reviewloop.Session, error) {
+			return newWorkflowSession(deps, name, opts)
+		},
+		newArtifactWriter:              reviewloop.NewArtifactWriter,
+		newCommunicationChannelManager: newWorkflowChannelManager,
+		newRunID:                       reviewloop.NewRunID,
+		run:                            reviewloop.Run,
+		newLock: func() (dirlock.Locker, error) {
+			return dirlock.NewInCurrentDirectory()
+		},
 	}
-	lock, err := directorylock.NewInCurrentDirectory()
+}
+
+func newSessionDependencies() agentsession.Dependencies {
+	return agentsession.NewSystemDependencies(reviewloop.NewSessionNameBuilder())
+}
+
+func newAgentSession(deps agentsession.Dependencies, name string, opts agentsession.SessionOptions) (agentsession.Session, error) {
+	return agentpkg.NewSession(deps, name, opts)
+}
+
+type workflowSessionAdapter struct {
+	session agentsession.Session
+}
+
+func (s workflowSessionAdapter) Start(rolePrompt string) error {
+	return s.session.Start(rolePrompt)
+}
+
+func (s workflowSessionAdapter) RunTurn(prompt string) (reviewloop.TurnResult, error) {
+	result, err := s.session.RunTurn(prompt)
 	if err != nil {
-		panic(err)
+		return reviewloop.TurnResult{}, err
 	}
-	cfg.lock = lock
-	for _, option := range options {
-		if option != nil {
-			option(&cfg)
+	return reviewloop.TurnResult{
+		Output:     result.Output,
+		RawCapture: result.RawCapture,
+	}, nil
+}
+
+func (s workflowSessionAdapter) InjectSideChannel(message string) error {
+	return s.session.InjectSideChannel(message)
+}
+
+func (s workflowSessionAdapter) SessionName() string {
+	return s.session.SessionName()
+}
+
+func (s workflowSessionAdapter) Close() error {
+	return s.session.Close()
+}
+
+func newWorkflowSession(deps agentsession.Dependencies, name string, opts reviewloop.SessionOptions) (reviewloop.Session, error) {
+	session, err := newAgentSession(deps, name, agentsession.SessionOptions{
+		RunID:       opts.RunID,
+		Role:        opts.Role,
+		IdleTimeout: opts.IdleTimeout,
+	})
+	if err != nil {
+		return nil, err
+	}
+	return workflowSessionAdapter{session: session}, nil
+}
+
+type workflowChannelManagerAdapter struct {
+	inner    filechannel.ChannelManager
+	messages chan reviewloop.ChannelMessage
+	errors   chan error
+}
+
+func newWorkflowChannelManager(cfg reviewloop.ChannelConfig) (reviewloop.ChannelManager, error) {
+	inner, err := filechannel.NewFIFOManager(filechannel.FIFOConfig{Path: cfg.Path})
+	if err != nil {
+		return nil, err
+	}
+
+	manager := &workflowChannelManagerAdapter{
+		inner:    inner,
+		messages: make(chan reviewloop.ChannelMessage, 1),
+		errors:   make(chan error, 1),
+	}
+	go manager.forward()
+	return manager, nil
+}
+
+func (m *workflowChannelManagerAdapter) Messages() <-chan reviewloop.ChannelMessage {
+	return m.messages
+}
+
+func (m *workflowChannelManagerAdapter) Errors() <-chan error {
+	return m.errors
+}
+
+func (m *workflowChannelManagerAdapter) Stop() error {
+	return m.inner.Stop()
+}
+
+func (m *workflowChannelManagerAdapter) Remove() error {
+	return m.inner.Remove()
+}
+
+func (m *workflowChannelManagerAdapter) forward() {
+	defer close(m.messages)
+	defer close(m.errors)
+
+	messages := m.inner.Messages()
+	errs := m.inner.Errors()
+	for messages != nil || errs != nil {
+		select {
+		case msg, ok := <-messages:
+			if !ok {
+				messages = nil
+				continue
+			}
+			m.messages <- reviewloop.ChannelMessage{
+				Path:       msg.Path,
+				Body:       msg.Body,
+				ReceivedAt: msg.ReceivedAt,
+			}
+		case err, ok := <-errs:
+			if !ok {
+				errs = nil
+				continue
+			}
+			m.errors <- adaptChannelError(err)
 		}
 	}
-	return cfg
 }
 
-func defaultRunnerConfig(cfg runnerConfig) runnerConfig {
-	if cfg.stdin == nil {
-		cfg.stdin = os.Stdin
+func adaptChannelError(err error) error {
+	if err == nil {
+		return nil
 	}
-	if cfg.stdout == nil {
-		cfg.stdout = os.Stdout
-	}
-	if cfg.stderr == nil {
-		cfg.stderr = os.Stderr
-	}
-	if cfg.getenv == nil {
-		cfg.getenv = os.Getenv
-	}
-	if cfg.validateBackend == nil {
-		cfg.validateBackend = cli.ValidateBackend
-	}
-	if cfg.run == nil {
-		cfg.run = implementwithreviewer.Run
-	}
-	if cfg.lock == nil {
-		lock, err := directorylock.NewInCurrentDirectory()
-		if err != nil {
-			panic(err)
+
+	var readerErr *filechannel.ReaderError
+	if errors.As(err, &readerErr) && readerErr != nil {
+		return &reviewloop.ChannelReaderError{
+			Path: readerErr.Path,
+			Err:  readerErr.Err,
 		}
-		cfg.lock = lock
 	}
-	return cfg
+	return err
 }
 
-func WithStdin(stdin io.Reader) RunnerOption {
-	return func(cfg *runnerConfig) {
-		cfg.stdin = stdin
+func resolveLock(cfg runnerConfig) (dirlock.Locker, error) {
+	if cfg.lock != nil {
+		return cfg.lock, nil
 	}
-}
-
-func WithStdout(stdout io.Writer) RunnerOption {
-	return func(cfg *runnerConfig) {
-		cfg.stdout = stdout
+	if cfg.newLock == nil {
+		return nil, errors.New("lock is not configured")
 	}
-}
-
-func WithStderr(stderr io.Writer) RunnerOption {
-	return func(cfg *runnerConfig) {
-		cfg.stderr = stderr
-	}
-}
-
-func WithGetenv(getenv func(string) string) RunnerOption {
-	return func(cfg *runnerConfig) {
-		cfg.getenv = getenv
-	}
-}
-
-func WithValidateBackend(validateBackend func(string) error) RunnerOption {
-	return func(cfg *runnerConfig) {
-		cfg.validateBackend = validateBackend
-	}
-}
-
-func WithRun(run runFunc) RunnerOption {
-	return func(cfg *runnerConfig) {
-		cfg.run = run
-	}
-}
-
-func WithLock(lock directorylock.Locker) RunnerOption {
-	return func(cfg *runnerConfig) {
-		cfg.lock = lock
-	}
-}
-
-func resolveMaxIterations(flagValue stringFlag, getenv func(string) string) (int, error) {
-	if flagValue.set {
-		return parsePositiveInt(flagValue.value, "--max-iterations")
-	}
-	if envValue := getenv("MAX_ITERATIONS"); envValue != "" {
-		return parsePositiveInt(envValue, "MAX_ITERATIONS")
-	}
-	return defaultMaxIterations, nil
+	return cfg.newLock()
 }
 
 func parsePositiveInt(raw string, source string) (int, error) {
