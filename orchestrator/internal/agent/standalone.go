@@ -1,4 +1,4 @@
-package session
+package agent
 
 import (
 	"errors"
@@ -7,8 +7,7 @@ import (
 	"io"
 	"strings"
 
-	"github.com/Yongbeom-Kim/harness/orchestrator/internal/agent/session/launcher"
-	"github.com/Yongbeom-Kim/harness/orchestrator/internal/agent/session/tmux"
+	"github.com/Yongbeom-Kim/harness/orchestrator/internal/agent/tmux"
 )
 
 type Locker interface {
@@ -19,15 +18,21 @@ type Locker interface {
 type StandaloneConfig struct {
 	ProgramName        string
 	DefaultSessionName string
-	LaunchCommand      string
 	SuccessLabel       string
 	Stdin              io.Reader
 	Stdout             io.Writer
 	Stderr             io.Writer
-	OpenSession        func(sessionName string) (tmux.TmuxSessionLike, error)
-	Launcher           launcher.Builder
 	Lock               Locker
 	NewLock            func() (Locker, error)
+	NewAgent           func(string) StandaloneAgent
+	OpenSession        func(string) (tmux.TmuxSessionLike, error)
+}
+
+type StandaloneAgent interface {
+	Start() error
+	WaitUntilReady() error
+	SessionName() string
+	Close() error
 }
 
 type standaloneArgs struct {
@@ -84,23 +89,37 @@ func parseStandaloneArgs(args []string, cfg StandaloneConfig) (standaloneArgs, i
 }
 
 func runStandaloneLaunch(cfg StandaloneConfig, parsed standaloneArgs) int {
-	openSession, launchBuilder, err := resolveLaunchDependencies(cfg)
-	if err != nil {
+	if cfg.NewAgent == nil {
+		fmt.Fprintln(cfg.Stderr, "agent constructor is not configured")
+		return 1
+	}
+	agent := cfg.NewAgent(parsed.sessionName)
+	if agent == nil {
+		fmt.Fprintln(cfg.Stderr, "agent constructor returned nil")
+		return 1
+	}
+	if err := agent.Start(); err != nil {
 		fmt.Fprintln(cfg.Stderr, err.Error())
 		return 1
 	}
-
-	session, pane, err := launchSession(openSession, launchBuilder, parsed.sessionName, cfg.LaunchCommand)
-	if err != nil {
+	if err := agent.WaitUntilReady(); err != nil {
+		_ = agent.Close()
 		fmt.Fprintln(cfg.Stderr, err.Error())
-		return 1
-	}
-	if pane == nil {
-		fmt.Fprintln(cfg.Stderr, "tmux pane was not created")
 		return 1
 	}
 
 	if parsed.attach {
+		openSession := cfg.OpenSession
+		if openSession == nil {
+			openSession = func(sessionName string) (tmux.TmuxSessionLike, error) {
+				return tmux.OpenTmuxSession(sessionName)
+			}
+		}
+		session, err := openSession(agent.SessionName())
+		if err != nil {
+			fmt.Fprintln(cfg.Stderr, err.Error())
+			return 1
+		}
 		if err := session.Attach(cfg.Stdin, cfg.Stdout, cfg.Stderr); err != nil {
 			fmt.Fprintln(cfg.Stderr, err.Error())
 			return 1
@@ -108,7 +127,7 @@ func runStandaloneLaunch(cfg StandaloneConfig, parsed standaloneArgs) int {
 		return 0
 	}
 
-	fmt.Fprintf(cfg.Stdout, "Launched %s in tmux session %q\n", cfg.SuccessLabel, session.AttachTarget())
+	fmt.Fprintf(cfg.Stdout, "Launched %s in tmux session %q\n", cfg.SuccessLabel, agent.SessionName())
 	return 0
 }
 
@@ -120,15 +139,4 @@ func resolveStandaloneLock(cfg StandaloneConfig) (Locker, error) {
 		return nil, errors.New("lock is not configured")
 	}
 	return cfg.NewLock()
-}
-
-func resolveLaunchDependencies(cfg StandaloneConfig) (func(string) (tmux.TmuxSessionLike, error), launcher.Builder, error) {
-	switch {
-	case cfg.OpenSession == nil:
-		return nil, nil, errors.New("session opener is not configured")
-	case cfg.Launcher == nil:
-		return nil, nil, errors.New("launcher is not configured")
-	default:
-		return cfg.OpenSession, cfg.Launcher, nil
-	}
 }

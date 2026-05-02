@@ -9,10 +9,7 @@ import (
 	"testing"
 	"time"
 
-	agentpkg "github.com/Yongbeom-Kim/harness/orchestrator/internal/agent"
-	agentsession "github.com/Yongbeom-Kim/harness/orchestrator/internal/agent/session"
 	"github.com/Yongbeom-Kim/harness/orchestrator/internal/dirlock"
-	"github.com/Yongbeom-Kim/harness/orchestrator/internal/reviewloop"
 )
 
 type panicReader struct{}
@@ -22,7 +19,7 @@ type errReader struct {
 }
 
 type runRecorder struct {
-	configs []reviewloop.RunConfig
+	configs []runConfig
 	err     error
 }
 
@@ -40,7 +37,7 @@ func (r errReader) Read(_ []byte) (int, error) {
 	return 0, r.err
 }
 
-func (r *runRecorder) run(_ context.Context, cfg reviewloop.RunConfig) error {
+func (r *runRecorder) run(_ context.Context, cfg runConfig) error {
 	r.configs = append(r.configs, cfg)
 	return r.err
 }
@@ -205,24 +202,10 @@ func TestRunRejectsInvalidBackendBeforeReadingStdin(t *testing.T) {
 	}
 }
 
-func TestValidateAgentBackendRejectsUnknownBackend(t *testing.T) {
-	err := agentpkg.ValidateBackend("bad")
+func TestNewAgentForBackendRejectsUnknownBackend(t *testing.T) {
+	_, err := newAgentForBackend("bad", "session")
 	if err == nil {
 		t.Fatal("expected validation error")
-	}
-	if !strings.Contains(err.Error(), "unknown backend: bad") {
-		t.Fatalf("unexpected error: %v", err)
-	}
-}
-
-func TestNewAgentSessionRejectsUnknownBackend(t *testing.T) {
-	_, err := newAgentSession(agentsession.Dependencies{}, "bad", agentsession.SessionOptions{
-		RunID:       "run",
-		Role:        "implementer",
-		IdleTimeout: time.Second,
-	})
-	if err == nil {
-		t.Fatal("expected session creation error")
 	}
 	if !strings.Contains(err.Error(), "unknown backend: bad") {
 		t.Fatalf("unexpected error: %v", err)
@@ -259,7 +242,7 @@ func TestRunReadTaskErrorExitsOne(t *testing.T) {
 	}
 }
 
-func TestRunSetsNewSession(t *testing.T) {
+func TestRunSetsNewAgentFactory(t *testing.T) {
 	recorder := &runRecorder{}
 	exitCode := run([]string{"--implementer", "codex", "--reviewer", "claude"}, runnerConfig{
 		stdin:           strings.NewReader("task"),
@@ -268,10 +251,8 @@ func TestRunSetsNewSession(t *testing.T) {
 		lock:            &fakeLock{},
 		getenv:          func(string) string { return "" },
 		validateBackend: func(string) error { return nil },
-		newSession: func(string, reviewloop.SessionOptions) (reviewloop.Session, error) {
-			return nil, nil
-		},
-		run: recorder.run,
+		newAgent:        func(string, string) (workflowAgent, error) { return &fakeWorkflowAgent{}, nil },
+		run:             recorder.run,
 	})
 	if exitCode != 0 {
 		t.Fatalf("unexpected exit code: %d", exitCode)
@@ -279,8 +260,8 @@ func TestRunSetsNewSession(t *testing.T) {
 	if len(recorder.configs) < 1 {
 		t.Fatal("expected runner to be invoked")
 	}
-	if recorder.configs[0].NewSession == nil {
-		t.Fatal("expected NewSession closure")
+	if recorder.configs[0].NewAgent == nil {
+		t.Fatal("expected NewAgent closure")
 	}
 }
 
@@ -301,10 +282,8 @@ func TestRunMaxIterationPrecedenceAndRunnerConfig(t *testing.T) {
 			return ""
 		},
 		validateBackend: func(string) error { return nil },
-		newSession: func(string, reviewloop.SessionOptions) (reviewloop.Session, error) {
-			return nil, nil
-		},
-		run: recorder.run,
+		newAgent:        func(string, string) (workflowAgent, error) { return &fakeWorkflowAgent{}, nil },
+		run:             recorder.run,
 	})
 
 	if exitCode != 0 {
@@ -336,7 +315,7 @@ func TestRunPropagatesRunnerExitCode(t *testing.T) {
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
 	recorder := &runRecorder{
-		err: reviewloop.NewExitError(1, true, errors.New("already reported")),
+		err: newExitError(1, true, errors.New("already reported")),
 	}
 
 	exitCode := run([]string{"--implementer", "codex", "--reviewer", "claude"}, runnerConfig{
@@ -346,10 +325,8 @@ func TestRunPropagatesRunnerExitCode(t *testing.T) {
 		lock:            &fakeLock{},
 		getenv:          func(string) string { return "" },
 		validateBackend: func(string) error { return nil },
-		newSession: func(string, reviewloop.SessionOptions) (reviewloop.Session, error) {
-			return nil, nil
-		},
-		run: recorder.run,
+		newAgent:        func(string, string) (workflowAgent, error) { return &fakeWorkflowAgent{}, nil },
+		run:             recorder.run,
 	})
 
 	if exitCode != 1 {
@@ -359,6 +336,17 @@ func TestRunPropagatesRunnerExitCode(t *testing.T) {
 		t.Fatalf("expected silent runner exit to avoid duplicate stderr, got %q", stderr.String())
 	}
 }
+
+type fakeWorkflowAgent struct{}
+
+func (a *fakeWorkflowAgent) Start() error            { return nil }
+func (a *fakeWorkflowAgent) WaitUntilReady() error   { return nil }
+func (a *fakeWorkflowAgent) SendPrompt(string) error { return nil }
+func (a *fakeWorkflowAgent) Capture() (string, error) {
+	return "", nil
+}
+func (a *fakeWorkflowAgent) SessionName() string { return "session" }
+func (a *fakeWorkflowAgent) Close() error        { return nil }
 
 func TestRunReturnsLockAcquireFailure(t *testing.T) {
 	var stdout bytes.Buffer

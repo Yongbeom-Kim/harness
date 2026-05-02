@@ -1,4 +1,4 @@
-package reviewloop
+package main
 
 import (
 	"encoding/json"
@@ -11,7 +11,7 @@ type artifactWriter struct {
 	paths artifactPaths
 }
 
-func NewArtifactWriter(runID string) (ArtifactSink, error) {
+func newArtifactWriter(runID string) (artifactSink, error) {
 	paths, err := newArtifactPaths(runsRootDir, runID)
 	if err != nil {
 		return nil, err
@@ -19,15 +19,15 @@ func NewArtifactWriter(runID string) (ArtifactSink, error) {
 	return &artifactWriter{paths: paths}, nil
 }
 
-func (w *artifactWriter) WriteMetadata(metadata RunMetadata) error {
+func (w *artifactWriter) WriteMetadata(metadata runMetadata) error {
 	return writeJSONFile(w.paths.metadataPath, metadata)
 }
 
-func (w *artifactWriter) AppendTransition(transition StateTransition) error {
+func (w *artifactWriter) AppendTransition(transition stateTransition) error {
 	return appendJSONL(w.paths.transitionsPath, "transition log", transition)
 }
 
-func (w *artifactWriter) AppendChannelEvent(event ChannelEvent) error {
+func (w *artifactWriter) AppendChannelEvent(event channelEvent) error {
 	return appendJSONL(w.paths.channelEventsPath, "channel event log", event)
 }
 
@@ -39,7 +39,7 @@ func (w *artifactWriter) WriteCapture(name string, text string) error {
 	return nil
 }
 
-func (w *artifactWriter) WriteResult(result RunResult) error {
+func (w *artifactWriter) WriteResult(result runResult) error {
 	return writeJSONFile(w.paths.resultPath, result)
 }
 

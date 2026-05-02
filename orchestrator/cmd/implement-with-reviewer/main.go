@@ -12,10 +12,8 @@ import (
 	"time"
 
 	agentpkg "github.com/Yongbeom-Kim/harness/orchestrator/internal/agent"
-	agentsession "github.com/Yongbeom-Kim/harness/orchestrator/internal/agent/session"
 	"github.com/Yongbeom-Kim/harness/orchestrator/internal/dirlock"
 	"github.com/Yongbeom-Kim/harness/orchestrator/internal/filechannel"
-	"github.com/Yongbeom-Kim/harness/orchestrator/internal/reviewloop"
 )
 
 const (
@@ -25,7 +23,7 @@ const (
 
 var errEmptyTask = errors.New("task from stdin must not be empty")
 
-type runFunc func(context.Context, reviewloop.RunConfig) error
+type runFunc func(context.Context, runConfig) error
 
 type runnerConfig struct {
 	stdin                          io.Reader
@@ -33,9 +31,9 @@ type runnerConfig struct {
 	stderr                         io.Writer
 	getenv                         func(string) string
 	validateBackend                func(string) error
-	newSession                     func(string, reviewloop.SessionOptions) (reviewloop.Session, error)
-	newArtifactWriter              func(string) (reviewloop.ArtifactSink, error)
-	newCommunicationChannelManager func(reviewloop.ChannelConfig) (reviewloop.ChannelManager, error)
+	newAgent                       func(string, string) (workflowAgent, error)
+	newArtifactWriter              func(string) (artifactSink, error)
+	newCommunicationChannelManager func(channelConfig) (channelManager, error)
 	newRunID                       func() (string, error)
 	run                            runFunc
 	lock                           dirlock.Locker
@@ -158,7 +156,7 @@ func runImplementWithReviewer(cfg runnerConfig, parsed parsedArgs) int {
 		return 1
 	}
 
-	err = cfg.run(context.Background(), reviewloop.RunConfig{
+	err = cfg.run(context.Background(), runConfig{
 		Task:                           task,
 		Implementer:                    parsed.implementer,
 		Reviewer:                       parsed.reviewer,
@@ -166,14 +164,14 @@ func runImplementWithReviewer(cfg runnerConfig, parsed parsedArgs) int {
 		IdleTimeout:                    defaultIdleTimeout,
 		Stdout:                         cfg.stdout,
 		Stderr:                         cfg.stderr,
-		NewSession:                     cfg.newSession,
+		NewAgent:                       cfg.newAgent,
 		NewArtifactWriter:              cfg.newArtifactWriter,
 		NewCommunicationChannelManager: cfg.newCommunicationChannelManager,
 		NewRunID:                       cfg.newRunID,
 	})
 
 	if err != nil {
-		if exitErr, ok := reviewloop.AsExitError(err); ok {
+		if exitErr, ok := asExitError(err); ok {
 			if !exitErr.Silent() {
 				fmt.Fprintln(cfg.stderr, err.Error())
 			}
@@ -187,84 +185,41 @@ func runImplementWithReviewer(cfg runnerConfig, parsed parsedArgs) int {
 }
 
 func newRunnerConfig() runnerConfig {
-	deps := newSessionDependencies()
 	return runnerConfig{
-		stdin:           os.Stdin,
-		stdout:          os.Stdout,
-		stderr:          os.Stderr,
-		getenv:          os.Getenv,
-		validateBackend: agentpkg.ValidateBackend,
-		newSession: func(name string, opts reviewloop.SessionOptions) (reviewloop.Session, error) {
-			return newWorkflowSession(deps, name, opts)
-		},
-		newArtifactWriter:              reviewloop.NewArtifactWriter,
+		stdin:                          os.Stdin,
+		stdout:                         os.Stdout,
+		stderr:                         os.Stderr,
+		getenv:                         os.Getenv,
+		validateBackend:                agentpkg.ValidateBackend,
+		newAgent:                       newAgentForBackend,
+		newArtifactWriter:              newArtifactWriter,
 		newCommunicationChannelManager: newWorkflowChannelManager,
-		newRunID:                       reviewloop.NewRunID,
-		run:                            reviewloop.Run,
+		newRunID:                       newRunID,
+		run:                            runWorkflow,
 		newLock: func() (dirlock.Locker, error) {
 			return dirlock.NewInCurrentDirectory()
 		},
 	}
 }
 
-func newSessionDependencies() agentsession.Dependencies {
-	return agentsession.NewSystemDependencies(reviewloop.NewSessionNameBuilder())
-}
-
-func newAgentSession(deps agentsession.Dependencies, name string, opts agentsession.SessionOptions) (agentsession.Session, error) {
-	return agentpkg.NewSession(deps, name, opts)
-}
-
-type workflowSessionAdapter struct {
-	session agentsession.Session
-}
-
-func (s workflowSessionAdapter) Start(rolePrompt string) error {
-	return s.session.Start(rolePrompt)
-}
-
-func (s workflowSessionAdapter) RunTurn(prompt string) (reviewloop.TurnResult, error) {
-	result, err := s.session.RunTurn(prompt)
-	if err != nil {
-		return reviewloop.TurnResult{}, err
+func newAgentForBackend(name string, sessionName string) (workflowAgent, error) {
+	switch name {
+	case "codex":
+		return agentpkg.NewCodexAgent(sessionName), nil
+	case "claude":
+		return agentpkg.NewClaudeAgent(sessionName), nil
+	default:
+		return nil, agentpkg.UnknownBackendError(name)
 	}
-	return reviewloop.TurnResult{
-		Output:     result.Output,
-		RawCapture: result.RawCapture,
-	}, nil
-}
-
-func (s workflowSessionAdapter) InjectSideChannel(message string) error {
-	return s.session.InjectSideChannel(message)
-}
-
-func (s workflowSessionAdapter) SessionName() string {
-	return s.session.SessionName()
-}
-
-func (s workflowSessionAdapter) Close() error {
-	return s.session.Close()
-}
-
-func newWorkflowSession(deps agentsession.Dependencies, name string, opts reviewloop.SessionOptions) (reviewloop.Session, error) {
-	session, err := newAgentSession(deps, name, agentsession.SessionOptions{
-		RunID:       opts.RunID,
-		Role:        opts.Role,
-		IdleTimeout: opts.IdleTimeout,
-	})
-	if err != nil {
-		return nil, err
-	}
-	return workflowSessionAdapter{session: session}, nil
 }
 
 type workflowChannelManagerAdapter struct {
 	inner    filechannel.ChannelManager
-	messages chan reviewloop.ChannelMessage
+	messages chan channelMessage
 	errors   chan error
 }
 
-func newWorkflowChannelManager(cfg reviewloop.ChannelConfig) (reviewloop.ChannelManager, error) {
+func newWorkflowChannelManager(cfg channelConfig) (channelManager, error) {
 	inner, err := filechannel.NewFIFOManager(filechannel.FIFOConfig{Path: cfg.Path})
 	if err != nil {
 		return nil, err
@@ -272,14 +227,14 @@ func newWorkflowChannelManager(cfg reviewloop.ChannelConfig) (reviewloop.Channel
 
 	manager := &workflowChannelManagerAdapter{
 		inner:    inner,
-		messages: make(chan reviewloop.ChannelMessage, 1),
+		messages: make(chan channelMessage, 1),
 		errors:   make(chan error, 1),
 	}
 	go manager.forward()
 	return manager, nil
 }
 
-func (m *workflowChannelManagerAdapter) Messages() <-chan reviewloop.ChannelMessage {
+func (m *workflowChannelManagerAdapter) Messages() <-chan channelMessage {
 	return m.messages
 }
 
@@ -308,7 +263,7 @@ func (m *workflowChannelManagerAdapter) forward() {
 				messages = nil
 				continue
 			}
-			m.messages <- reviewloop.ChannelMessage{
+			m.messages <- channelMessage{
 				Path:       msg.Path,
 				Body:       msg.Body,
 				ReceivedAt: msg.ReceivedAt,
@@ -330,7 +285,7 @@ func adaptChannelError(err error) error {
 
 	var readerErr *filechannel.ReaderError
 	if errors.As(err, &readerErr) && readerErr != nil {
-		return &reviewloop.ChannelReaderError{
+		return &channelReaderError{
 			Path: readerErr.Path,
 			Err:  readerErr.Err,
 		}
@@ -364,7 +319,7 @@ func readTask(r io.Reader) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("failed to read stdin: %w", err)
 	}
-	task := strings.TrimRight(string(messageBytes), "\n")
+	task := strings.TrimRight(string(messageBytes), "\r\n")
 	if strings.TrimSpace(task) == "" {
 		return "", errEmptyTask
 	}

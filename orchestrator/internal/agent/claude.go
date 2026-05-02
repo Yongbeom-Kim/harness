@@ -1,34 +1,146 @@
 package agent
 
 import (
-	agentsession "github.com/Yongbeom-Kim/harness/orchestrator/internal/agent/session"
+	"fmt"
+	"strings"
+	"sync"
+	"time"
+
+	"github.com/Yongbeom-Kim/harness/orchestrator/internal/agent/tmux"
 )
 
 type ClaudeAgent struct {
-	sessionDeps        agentsession.Dependencies
-	name               string
-	defaultSessionName string
-	launchCommand      string
-	successLabel       string
-	startupInstruction string
-	readyMatcher       func(string) bool
+	sessionName         string
+	session             tmux.TmuxSessionLike
+	pane                tmux.TmuxPaneLike
+	openSession         func(string) (tmux.TmuxSessionLike, error)
+	launchCommand       string
+	readyMatcher        func(string) bool
+	startupReadyTimeout time.Duration
+	startupQuietPeriod  time.Duration
+	capturePollInterval time.Duration
+	closed              bool
+	sendMu              sync.Mutex
 }
 
-func NewClaudeAgent(sessionDeps agentsession.Dependencies) ClaudeAgent {
-	return ClaudeAgent{
-		sessionDeps:        sessionDeps,
-		name:               "claude",
-		defaultSessionName: "claude",
-		launchCommand:      "claude",
-		successLabel:       "Claude",
-		startupInstruction: "You are running inside a persistent Claude tmux session. Reply with exactly Ready. Do not use tools or inspect files. Wait for the next task.",
+func NewClaudeAgent(sessionName string) *ClaudeAgent {
+	return &ClaudeAgent{
+		sessionName:   sessionName,
+		openSession:   newSystemTmuxSession,
+		launchCommand: "claude",
+		readyMatcher:  claudeReadyMatcher,
 	}
 }
 
-func (a ClaudeAgent) NewSession(opts agentsession.SessionOptions) (agentsession.Session, error) {
-	return newSession(a.sessionDeps, a.name, a.launchCommand, a.startupInstruction, a.readyMatcher, opts)
+func (a *ClaudeAgent) Start() error {
+	if a == nil {
+		return fmt.Errorf("nil ClaudeAgent")
+	}
+	if a.sessionName == "" {
+		return fmt.Errorf("session name must not be empty")
+	}
+	openSession := a.openSession
+	if openSession == nil {
+		openSession = newSystemTmuxSession
+	}
+	session, err := openSession(a.sessionName)
+	if err != nil {
+		return NewAgentError(ErrorKindLaunch, a.sessionName, "", err)
+	}
+	pane, err := session.NewPane()
+	if err != nil {
+		_ = session.Close()
+		return NewAgentError(ErrorKindLaunch, a.sessionName, "", err)
+	}
+	if err := pane.SendText(buildLaunchCommand(a.launchCommand)); err != nil {
+		_ = session.Close()
+		return NewAgentError(ErrorKindLaunch, a.sessionName, "", err)
+	}
+	a.session = session
+	a.pane = pane
+	a.closed = false
+	return nil
 }
 
-func (a ClaudeAgent) RunStandalone(args []string, cfg StandaloneConfig) int {
-	return runStandalone(args, a.sessionDeps, a.name, a.defaultSessionName, a.launchCommand, a.successLabel, cfg)
+func (a *ClaudeAgent) WaitUntilReady() error {
+	return waitUntilReady(a.sessionName, a.pane, a.readyMatcher, a.readyTimeout(), a.quietPeriod(), a.pollInterval())
+}
+
+func (a *ClaudeAgent) SendPrompt(prompt string) error {
+	a.sendMu.Lock()
+	defer a.sendMu.Unlock()
+	if a.pane == nil {
+		return NewAgentError(ErrorKindCapture, a.sessionName, "", fmt.Errorf("agent session has not started"))
+	}
+	if err := a.pane.SendText(prompt); err != nil {
+		return NewAgentError(ErrorKindCapture, a.sessionName, "", err)
+	}
+	return nil
+}
+
+func (a *ClaudeAgent) Capture() (string, error) {
+	if a.pane == nil {
+		return "", NewAgentError(ErrorKindCapture, a.sessionName, "", fmt.Errorf("agent session has not started"))
+	}
+	capture, err := a.pane.Capture()
+	if err != nil {
+		return "", NewAgentError(ErrorKindCapture, a.sessionName, "", err)
+	}
+	return capture, nil
+}
+
+func (a *ClaudeAgent) SessionName() string {
+	if a == nil {
+		return ""
+	}
+	if a.session != nil {
+		return a.session.Name()
+	}
+	return a.sessionName
+}
+
+func (a *ClaudeAgent) Close() error {
+	if a == nil || a.closed {
+		return nil
+	}
+	a.closed = true
+	if a.session == nil {
+		return nil
+	}
+	if err := a.session.Close(); err != nil {
+		return NewAgentError(ErrorKindClose, a.SessionName(), "", err)
+	}
+	return nil
+}
+
+func (a *ClaudeAgent) readyTimeout() time.Duration {
+	if a.startupReadyTimeout > 0 {
+		return a.startupReadyTimeout
+	}
+	return defaultStartupReadyTimeout
+}
+
+func (a *ClaudeAgent) quietPeriod() time.Duration {
+	if a.startupQuietPeriod > 0 {
+		return a.startupQuietPeriod
+	}
+	return defaultStartupQuietPeriod
+}
+
+func (a *ClaudeAgent) pollInterval() time.Duration {
+	if a.capturePollInterval > 0 {
+		return a.capturePollInterval
+	}
+	return defaultCapturePollInterval
+}
+
+func claudeReadyMatcher(capture string) bool {
+	lower := strings.ToLower(capture)
+	if strings.Contains(lower, "press enter to continue") ||
+		strings.Contains(lower, "log in") ||
+		strings.Contains(lower, "login") ||
+		strings.Contains(lower, "do you trust") {
+		return false
+	}
+	return strings.TrimSpace(capture) != ""
 }

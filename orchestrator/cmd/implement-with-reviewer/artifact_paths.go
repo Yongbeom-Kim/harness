@@ -1,4 +1,4 @@
-package reviewloop
+package main
 
 import (
 	"fmt"
@@ -39,4 +39,8 @@ func successCaptureName(iteration int, role string) string {
 
 func failureCaptureName(iteration int, role string, suffix string) string {
 	return fmt.Sprintf("iter-%d-%s-%s.txt", iteration, role, suffix)
+}
+
+func buildSessionName(runID string, role string) string {
+	return fmt.Sprintf("iwr-%s-%s", runID, role)
 }

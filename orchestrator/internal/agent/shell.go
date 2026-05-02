@@ -1,18 +1,8 @@
-package launcher
+package agent
 
 import "strings"
 
-type Builder interface {
-	Build(command string, args ...string) string
-}
-
-type SourcedShellBuilder struct{}
-
-func NewSourcedShellBuilder() Builder {
-	return SourcedShellBuilder{}
-}
-
-func (SourcedShellBuilder) Build(command string, args ...string) string {
+func buildLaunchCommand(command string, args ...string) string {
 	quotedCommand := make([]string, 0, 1+len(args))
 	quotedCommand = append(quotedCommand, shellQuote(command))
 	for _, arg := range args {

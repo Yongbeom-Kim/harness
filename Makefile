@@ -8,13 +8,12 @@ setup:
 	ln -sfn "$(ROOT)/scripts/.agentrc" "$$HOME/.agentrc"
 
 build:
-	cd orchestrator && go build -o ../bin/tmux_codex cmd/tmux_codex/main.go
-	cd orchestrator && go build -o ../bin/tmux_claude cmd/tmux_claude/main.go
-	cd orchestrator && go build -o ../bin/tmux_agent cmd/tmux_agent/main.go
-	cd orchestrator && go build -o ../bin/implement-with-reviewer cmd/implement-with-reviewer/main.go
+	cd orchestrator && go build -o ../bin/tmux_codex ./cmd/tmux_codex
+	cd orchestrator && go build -o ../bin/tmux_claude ./cmd/tmux_claude
+	cd orchestrator && go build -o ../bin/implement-with-reviewer ./cmd/implement-with-reviewer
 
 clean:
-	rm -rf ../bin/*
+	rm -rf "$(ROOT)/bin"/*
 
 source_zshrc:
 	@touch ~/.zshrc

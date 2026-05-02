@@ -1,7 +1,4 @@
-// Package tmux runs the `tmux` binary: [NewTmuxSession] creates a detached session (default shell),
-// then [TmuxSession.NewPane] returns the default pane on first use and creates additional panes on
-// later calls; callers start workloads via [TmuxPaneLike.SendText].
-// Contracts are in interfaces.go.
+// Package tmux runs the `tmux` binary.
 package tmux
 
 import (
@@ -21,17 +18,35 @@ const (
 	captureHistoryStart   = "-32768"
 )
 
-// TmuxSession is the concrete tmux session. [NewTmuxSession] creates a single-window session with
-// the default shell in the only pane. The first [TmuxSession.NewPane] returns a handle to that
-// default pane; later calls create additional tmux panes whose lifecycle remains tied to the session
-// (I/O and [TmuxSession.Close]).
-//
-// AttachTarget is for operators (e.g. `tmux attach -t`); the runner only uses [TmuxSession.Name] for
-// metadata and log messages.
 type TmuxSession struct {
 	name                string
-	target              string // -t for pane commands, typically the default session pane or session:0.0
+	target              string
 	defaultPaneReturned bool
+}
+
+func NewTmuxSession(name string) (*TmuxSession, error) {
+	if name == "" {
+		return nil, fmt.Errorf("tmux session name must not be empty")
+	}
+	if _, err := runCommand("tmux", "new-session", "-d", "-s", name); err != nil {
+		return nil, &NewSessionError{SessionName: name, Err: err}
+	}
+	return &TmuxSession{name: name, target: defaultPaneTarget(name)}, nil
+}
+
+func OpenTmuxSession(name string) (*TmuxSession, error) {
+	if name == "" {
+		return nil, fmt.Errorf("tmux session name must not be empty")
+	}
+	session := &TmuxSession{name: name, target: defaultPaneTarget(name)}
+	exists, err := session.hasSession()
+	if err != nil {
+		return nil, err
+	}
+	if !exists {
+		return nil, &TmuxSessionAbsentError{Message: fmt.Sprintf("can't find session: %s", name)}
+	}
+	return session, nil
 }
 
 func (s *TmuxSession) Name() string {
@@ -41,7 +56,6 @@ func (s *TmuxSession) Name() string {
 	return s.name
 }
 
-// AttachTarget is a value suitable for `tmux attach -t` (the session name).
 func (s *TmuxSession) AttachTarget() string {
 	if s == nil {
 		return ""
@@ -49,7 +63,6 @@ func (s *TmuxSession) AttachTarget() string {
 	return s.name
 }
 
-// Attach hands the provided stdio streams to `tmux attach-session -t <session>`.
 func (s *TmuxSession) Attach(stdin io.Reader, stdout io.Writer, stderr io.Writer) error {
 	if s == nil {
 		return fmt.Errorf("nil TmuxSession")
@@ -76,12 +89,10 @@ func (s *TmuxSession) Attach(stdin io.Reader, stdout io.Writer, stderr io.Writer
 	return nil
 }
 
-// Close issues kill-session for this session, or no-op if the session is already gone.
 func (s *TmuxSession) Close() error {
 	if s == nil {
 		return nil
 	}
-
 	exists, err := s.hasSession()
 	if err != nil {
 		return err
@@ -89,7 +100,6 @@ func (s *TmuxSession) Close() error {
 	if !exists {
 		return nil
 	}
-
 	_, err = runCommand("tmux", "kill-session", "-t", s.name)
 	if err == nil {
 		return nil
@@ -111,22 +121,6 @@ func (s *TmuxSession) hasSession() (bool, error) {
 	return false, &HasSessionError{SessionName: s.name, Err: err}
 }
 
-// NewTmuxSession runs `tmux new-session -d -s name` (no initial command) so the default window/pane
-// starts the usual login/interactive shell. The caller starts Codex, Claude, etc. by sending the
-// launch line on the pane after [TmuxSession.NewPane]; the CLI runtime now composes that behavior via
-// the injected host/launcher packages.
-func NewTmuxSession(name string) (*TmuxSession, error) {
-	if name == "" {
-		return nil, fmt.Errorf("tmux session name must not be empty")
-	}
-	if _, err := runCommand("tmux", "new-session", "-d", "-s", name); err != nil {
-		return nil, &NewSessionError{SessionName: name, Err: err}
-	}
-	paneTarget := defaultPaneTarget(name)
-	return &TmuxSession{name: name, target: paneTarget}, nil
-}
-
-// NewPane returns the session's default pane on first use, then creates and returns additional panes.
 func (s *TmuxSession) NewPane() (TmuxPaneLike, error) {
 	if s == nil {
 		return nil, fmt.Errorf("nil TmuxSession")
@@ -151,15 +145,12 @@ func (s *TmuxSession) NewPane() (TmuxPaneLike, error) {
 }
 
 func defaultPaneTarget(sessionName string) string {
-	// One window, one pane: explicit pane target; session name alone is also accepted for many tmux
-	// subcommands but this matches common attach patterns.
 	if sessionName == "" {
 		return "%0"
 	}
 	return sessionName + ":0.0"
 }
 
-// TmuxPane implements [TmuxPaneLike] for a single known pane.
 type TmuxPane struct {
 	target  string
 	session *TmuxSession
@@ -170,10 +161,8 @@ func (p *TmuxPane) SendText(text string) error {
 		return fmt.Errorf("nil TmuxPane")
 	}
 	t := p.target
-	if t == "" {
-		if p.session != nil {
-			t = p.session.Name()
-		}
+	if t == "" && p.session != nil {
+		t = p.session.Name()
 	}
 	if t == "" {
 		return fmt.Errorf("tmux pane: empty target and no session name")
@@ -200,10 +189,8 @@ func (p *TmuxPane) Capture() (string, error) {
 		return "", fmt.Errorf("nil TmuxPane")
 	}
 	t := p.target
-	if t == "" {
-		if p.session != nil {
-			t = p.session.Name()
-		}
+	if t == "" && p.session != nil {
+		t = p.session.Name()
 	}
 	if t == "" {
 		return "", fmt.Errorf("tmux pane: empty target and no session name")
@@ -251,11 +238,7 @@ func runCommandWithInput(input string, name string, args ...string) (commandResu
 	}
 	err := cmd.Run()
 
-	result := commandResult{
-		stdout: stdout.String(),
-		stderr: stderr.String(),
-	}
-
+	result := commandResult{stdout: stdout.String(), stderr: stderr.String()}
 	if ctx.Err() != nil {
 		return result, fmt.Errorf("%s %s timed out: %w", name, strings.Join(args, " "), ctx.Err())
 	}
@@ -274,7 +257,6 @@ func runCommandWithInput(input string, name string, args ...string) (commandResu
 		}
 		return result, err
 	}
-
 	return result, nil
 }
 

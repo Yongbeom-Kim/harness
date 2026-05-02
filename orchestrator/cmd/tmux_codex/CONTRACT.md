@@ -2,13 +2,14 @@
 
 ## Purpose
 
-`codex` launches a persistent Codex instance inside a tmux session.
+`tmux_codex` launches a persistent Codex instance inside a tmux session.
 
 The command:
 
 - creates a tmux session
 - gets the default pane from that session
 - sends a launcher command that sources `$HOME/.agentrc` before starting `codex`
+- waits until Codex is ready for input
 - optionally attaches the current command IO streams to the tmux session
 
 This command is a lightweight operator entrypoint for a single Codex-backed tmux session.
@@ -16,7 +17,7 @@ This command is a lightweight operator entrypoint for a single Codex-backed tmux
 ## Invocation
 
 ```sh
-codex [--session <name>] [--attach]
+tmux_codex [--session <name>] [--attach]
 ```
 
 ## Inputs
@@ -67,7 +68,7 @@ The launcher contract is:
 
 ### Attach behavior
 
-If `--attach` is provided, the command calls tmux attach against the created session after sending the launcher command.
+If `--attach` is provided, the command calls tmux attach against the created session after Codex has started and become ready for input.
 
 The attach path uses the configured command IO streams:
 
@@ -81,7 +82,7 @@ If any of those streams are nil in-process, the tmux layer falls back to `os.Std
 
 ### Success output without attach
 
-On successful launch without `--attach`, the command prints:
+On successful launch without `--attach`, after Codex is ready for input, the command prints:
 
 ```text
 Launched Codex in tmux session "<session-name>"
@@ -100,7 +101,7 @@ Exit code: `0` when attach returns successfully.
 
 ### Runtime failure output
 
-If tmux session creation, pane creation, launcher send, or attach fails:
+If tmux session creation, pane creation, launcher send, readiness wait, or attach fails:
 
 - the command exits with code `1`
 - the failure is printed to `stderr`
@@ -112,6 +113,7 @@ If pane creation or launcher send fails after the tmux session is opened, the co
 - session creation failure is terminal
 - pane creation failure is terminal and triggers best-effort session cleanup
 - launcher send failure is terminal and triggers best-effort session cleanup
+- readiness failure is terminal and triggers best-effort session cleanup
 - attach failure is terminal
 - there is no fallback non-tmux execution mode
 

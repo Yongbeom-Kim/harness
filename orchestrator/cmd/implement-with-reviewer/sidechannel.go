@@ -1,6 +1,7 @@
-package reviewloop
+package main
 
 import (
+	"errors"
 	"fmt"
 	"path/filepath"
 	"strings"
@@ -14,8 +15,8 @@ const (
 )
 
 type sideChannelCoordinator struct {
-	sink     ArtifactSink
-	sessions map[string]Session
+	sink     artifactSink
+	sessions map[string]workflowAgent
 
 	mu    sync.RWMutex
 	ready map[string]bool
@@ -26,23 +27,12 @@ type channelRoute struct {
 	destinationRole string
 }
 
-func newSideChannelCoordinator(sink ArtifactSink, sessions map[string]Session) *sideChannelCoordinator {
+func newSideChannelCoordinator(sink artifactSink, sessions map[string]workflowAgent) *sideChannelCoordinator {
 	return &sideChannelCoordinator{
 		sink:     sink,
 		sessions: sessions,
 		ready:    make(map[string]bool),
 	}
-}
-
-func (c *sideChannelCoordinator) BuildStartupPrompt(role string, basePrompt string) string {
-	instructions := buildSideChannelInstructions(role)
-	if instructions == "" {
-		return basePrompt
-	}
-	if strings.TrimSpace(basePrompt) == "" {
-		return instructions
-	}
-	return strings.TrimSpace(basePrompt) + "\n\n" + instructions
 }
 
 func (c *sideChannelCoordinator) MarkReady(role string) {
@@ -51,13 +41,17 @@ func (c *sideChannelCoordinator) MarkReady(role string) {
 	c.ready[role] = true
 }
 
-func (c *sideChannelCoordinator) HandleMessage(msg ChannelMessage) error {
+func (c *sideChannelCoordinator) HandleMessage(msg channelMessage) error {
+	return handleChannelMessage(c, msg)
+}
+
+func handleChannelMessage(c *sideChannelCoordinator, msg channelMessage) error {
 	route, err := routeForChannelPath(msg.Path)
 	if err != nil {
 		return err
 	}
 
-	event := ChannelEvent{
+	event := channelEvent{
 		At:              channelEventTime(msg.ReceivedAt),
 		SourceRole:      route.sourceRole,
 		DestinationRole: route.destinationRole,
@@ -66,12 +60,11 @@ func (c *sideChannelCoordinator) HandleMessage(msg ChannelMessage) error {
 	}
 
 	if strings.TrimSpace(msg.Body) == "" {
-		event.Status = ChannelStatusDroppedEmpty
+		event.Status = channelStatusDroppedEmpty
 		return c.appendEvent(event)
 	}
-
 	if !c.isReady(route.destinationRole) {
-		event.Status = ChannelStatusDroppedNotStarted
+		event.Status = channelStatusDroppedNotStarted
 		return c.appendEvent(event)
 	}
 
@@ -79,20 +72,19 @@ func (c *sideChannelCoordinator) HandleMessage(msg ChannelMessage) error {
 	if session == nil {
 		return fmt.Errorf("missing side-channel session for role %s", route.destinationRole)
 	}
-
-	if err := session.InjectSideChannel(wrapSideChannelMessage(msg.Body)); err != nil {
-		event.Status = ChannelStatusDeliveryFailed
+	if err := session.SendPrompt(wrapSideChannelMessage(msg.Body)); err != nil {
+		event.Status = channelStatusDeliveryFailed
 		if appendErr := c.appendEvent(event); appendErr != nil {
 			return appendErr
 		}
 		return nil
 	}
 
-	event.Status = ChannelStatusDelivered
+	event.Status = channelStatusDelivered
 	return c.appendEvent(event)
 }
 
-func (c *sideChannelCoordinator) appendEvent(event ChannelEvent) error {
+func (c *sideChannelCoordinator) appendEvent(event channelEvent) error {
 	if c == nil || c.sink == nil {
 		return nil
 	}
@@ -120,9 +112,9 @@ func buildSideChannelInstructions(role string) string {
 
 func writableChannelForRole(role string) string {
 	switch role {
-	case RoleImplementer:
+	case roleImplementer:
 		return toReviewerPipePath
-	case RoleReviewer:
+	case roleReviewer:
 		return toImplementerPipePath
 	default:
 		return ""
@@ -132,9 +124,9 @@ func writableChannelForRole(role string) string {
 func routeForChannelPath(path string) (channelRoute, error) {
 	switch filepath.Base(path) {
 	case filepath.Base(toReviewerPipePath):
-		return channelRoute{sourceRole: RoleImplementer, destinationRole: RoleReviewer}, nil
+		return channelRoute{sourceRole: roleImplementer, destinationRole: roleReviewer}, nil
 	case filepath.Base(toImplementerPipePath):
-		return channelRoute{sourceRole: RoleReviewer, destinationRole: RoleImplementer}, nil
+		return channelRoute{sourceRole: roleReviewer, destinationRole: roleImplementer}, nil
 	default:
 		return channelRoute{}, fmt.Errorf("unknown side-channel path %q", path)
 	}
@@ -156,4 +148,16 @@ func channelEventTime(at time.Time) time.Time {
 		return time.Now().UTC()
 	}
 	return at.UTC()
+}
+
+func readerEventFromError(err error) channelEvent {
+	event := channelEvent{
+		At:     time.Now().UTC(),
+		Status: channelStatusReaderError,
+	}
+	var readerErr *channelReaderError
+	if errors.As(err, &readerErr) && readerErr != nil {
+		event.ChannelPath = readerErr.Path
+	}
+	return event
 }

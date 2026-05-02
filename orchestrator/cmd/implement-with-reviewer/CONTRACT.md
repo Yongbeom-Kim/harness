@@ -63,7 +63,7 @@ The command exits with code `2` and prints an error to `stderr` when:
 
 ### Persistent sessions
 
-V1 replaces one-shot backend subprocess calls with persistent backend sessions exposed through the `internal/cli.Session` API.
+The command owns the implementer/reviewer loop directly and drives concrete tmux-backed `CodexAgent` / `ClaudeAgent` instances from `internal/agent`.
 
 Each role owns its own tmux session for the lifetime of the run:
 
@@ -72,7 +72,7 @@ Each role owns its own tmux session for the lifetime of the run:
 
 This is an approved implementation deviation from the earlier reviewed design, which proposed one shared run-level tmux session with two panes.
 
-Both role sessions are created and started before the first real implementer turn runs. Startup acknowledgements are required to complete successfully, but successful startup text is not printed into the normal command transcript.
+Both role sessions are created, launched, and waited until ready before the first real implementer turn runs. There is no separate startup prompt phase.
 
 ### Side-channel runtime
 
@@ -98,7 +98,7 @@ This side-channel is additive only:
 - it does not change iteration control or termination rules
 - it may appear inside ordinary pane captures if delivery happens during an in-flight turn
 
-If a message arrives before the destination session has completed its startup prompt, the command drops it and records `dropped_not_started`.
+If a message arrives before the destination session has launched and become ready, the command drops it and records `dropped_not_started`.
 
 ### Completion contract
 
@@ -108,7 +108,7 @@ Each backend turn is instructed to finish with:
 <promise>done</promise>
 ```
 
-Backend adapters append the exact instruction line:
+The command appends the exact instruction line to every main workflow turn:
 
 ```text
 Finish your response with exactly <promise>done</promise>.
@@ -120,15 +120,11 @@ Approval is still detected by substring match on:
 <promise>APPROVED</promise>
 ```
 
-V1 intentionally does not strip `<promise>done</promise>` from:
-
-- raw captures
-- reviewer inputs
-- final printed implementation output
+Raw captures preserve the full pane text, including the done marker. Printed turn output, reviewer inputs, and final implementation text strip the terminal done marker.
 
 ### Idle timeout
 
-Each startup acknowledgement and each runtime turn uses a fixed 120-second idle timeout.
+Backend readiness uses the concrete agent startup readiness timeout. Runtime turns use the command idle timeout, defaulting to 30 minutes.
 
 If no new output appears and the turn never produces a new exact `<promise>done</promise>` line before that timeout, the run fails.
 
@@ -145,17 +141,17 @@ You are an expert software implementer. When given a task or reviewer feedback, 
 Reviewer role prompt:
 
 ```text
-You are a strict code reviewer. Review the implementation provided. If it is correct, complete, and handles edge cases properly, respond with exactly: <promise>APPROVED</promise> - nothing else. Otherwise respond with specific, actionable feedback only. No praise, no filler.
+You are a strict code reviewer. Review the implementation provided. If it is correct, complete, and handles edge cases properly, respond with <promise>APPROVED</promise> and then the required completion marker on the final line. Otherwise respond with specific, actionable feedback only, followed by the required completion marker. No praise, no filler.
 ```
 
 ### Side-channel capability
 
-Each role also receives startup instructions for a fixed FIFO-based side channel:
+Each role receives instructions for a fixed FIFO-based side channel as part of every main turn role contract:
 
 - `./to_reviewer.pipe`
 - `./to_implementer.pipe`
 
-The startup prompt tells the agent which literal path it can write to in order to message the other role from its current session. One side-channel message is one writer open-write-close cycle. The agent should write the full message body and then close the writer.
+The role contract tells the agent which literal path it can write to in order to message the other role from its current session. One side-channel message is one writer open-write-close cycle. The agent should write the full message body and then close the writer.
 
 ### Turn prompt shapes
 
@@ -190,7 +186,7 @@ Reviewer feedback:
 Rewrite addressing all feedback.
 ```
 
-Backend adapters own startup-only prompt decoration and the completion instruction line. The feature package owns the role prompts and turn prompt bodies.
+The command package owns role contracts, fixed side-channel instructions, marker decoration, capture slicing, and the completion instruction line. Backend agents only provide raw `SendPrompt` and `Capture` transport.
 
 ## Output Contract
 

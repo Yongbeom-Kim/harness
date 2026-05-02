@@ -1,4 +1,4 @@
-package reviewloop
+package main
 
 import (
 	"context"
@@ -9,22 +9,23 @@ import (
 	"sync"
 	"time"
 
+	agentpkg "github.com/Yongbeom-Kim/harness/orchestrator/internal/agent"
 	"github.com/google/uuid"
 )
 
 type sessionBinding struct {
 	role    string
 	backend string
-	session Session
+	session workflowAgent
 }
 
 type runner struct {
-	cfg                          RunConfig
+	cfg                          runConfig
 	runID                        string
-	artifacts                    ArtifactSink
+	artifacts                    artifactSink
 	implementer                  sessionBinding
 	reviewer                     sessionBinding
-	communicationChannelManagers []ChannelManager
+	communicationChannelManagers []channelManager
 	sideChannel                  *sideChannelCoordinator
 	sideChannelErrs              chan error
 	sideChannelDone              chan struct{}
@@ -32,11 +33,11 @@ type runner struct {
 	sideChannelStopOnce          sync.Once
 }
 
-func Run(ctx context.Context, cfg RunConfig) error {
+func runWorkflow(ctx context.Context, cfg runConfig) error {
 	cfg = defaultRunConfig(cfg)
 	if err := validateRunConfig(cfg); err != nil {
 		writeRuntimeError(cfg.Stderr, err)
-		return NewExitError(1, true, err)
+		return newExitError(1, true, err)
 	}
 
 	r := &runner{cfg: cfg}
@@ -44,7 +45,7 @@ func Run(ctx context.Context, cfg RunConfig) error {
 	return r.run(ctx)
 }
 
-func NewRunID() (string, error) {
+func newRunID() (string, error) {
 	runID, err := uuid.NewV7()
 	if err != nil {
 		return "", fmt.Errorf("failed to generate run ID: %w", err)
@@ -72,20 +73,19 @@ func (r *runner) run(ctx context.Context) error {
 	if transitionErr := r.appendTransition("run_started", 0, "", "", ""); transitionErr != nil {
 		return r.finish(resultStatusFailed, 0, "", transitionErr)
 	}
-
 	if startErr := r.startCommunicationChannelManagers(); startErr != nil {
 		return r.finish(resultStatusFailed, 0, "", startErr)
 	}
 
-	implementer, err := r.newSession(RoleImplementer, r.cfg.Implementer)
+	implementer, err := r.newSession(roleImplementer, r.cfg.Implementer)
 	if err != nil {
-		return r.finish(resultStatusFailed, 0, "", r.decorateRoleError(RoleImplementer, "session creation", err))
+		return r.finish(resultStatusFailed, 0, "", r.decorateRoleError(roleImplementer, "session creation", err))
 	}
 	r.implementer = implementer
 
-	reviewer, err := r.newSession(RoleReviewer, r.cfg.Reviewer)
+	reviewer, err := r.newSession(roleReviewer, r.cfg.Reviewer)
 	if err != nil {
-		return r.finish(resultStatusFailed, 0, "", r.decorateRoleError(RoleReviewer, "session creation", err))
+		return r.finish(resultStatusFailed, 0, "", r.decorateRoleError(roleReviewer, "session creation", err))
 	}
 	r.reviewer = reviewer
 
@@ -94,12 +94,11 @@ func (r *runner) run(ctx context.Context) error {
 	if startErr := r.startSessions(); startErr != nil {
 		return r.finish(resultStatusFailed, 0, "", startErr)
 	}
-
 	if metadataErr := r.writeMetadata(); metadataErr != nil {
 		return r.finish(resultStatusFailed, 0, "", metadataErr)
 	}
 
-	implementation, err := r.executeTurn(0, r.implementer, BuildInitialImplementerPrompt(r.cfg.Task))
+	implementation, err := r.executeTurn(0, r.implementer, BuildImplementerPrompt(r.cfg.Task))
 	if err != nil {
 		return r.finish(resultStatusFailed, 0, "", err)
 	}
@@ -108,7 +107,6 @@ func (r *runner) run(ctx context.Context) error {
 		if err := ctx.Err(); err != nil {
 			return r.finish(resultStatusFailed, iteration, implementation, err)
 		}
-
 		review, err := r.executeTurn(iteration, r.reviewer, BuildReviewerPrompt(r.cfg.Task, implementation))
 		if err != nil {
 			return r.finish(resultStatusFailed, iteration, implementation, err)
@@ -119,7 +117,6 @@ func (r *runner) run(ctx context.Context) error {
 			}
 			return r.finish(resultStatusApproved, iteration, implementation, nil)
 		}
-
 		implementation, err = r.executeTurn(iteration, r.implementer, BuildRewritePrompt(r.cfg.Task, implementation, review))
 		if err != nil {
 			return r.finish(resultStatusFailed, iteration, implementation, err)
@@ -133,20 +130,12 @@ func (r *runner) run(ctx context.Context) error {
 }
 
 func (r *runner) newSession(role string, backend string) (sessionBinding, error) {
-	session, err := r.cfg.NewSession(backend, SessionOptions{
-		RunID:       r.runID,
-		Role:        role,
-		IdleTimeout: r.cfg.IdleTimeout,
-	})
+	sessionName := buildSessionName(r.runID, role)
+	session, err := r.cfg.NewAgent(backend, sessionName)
 	if err != nil {
 		return sessionBinding{}, err
 	}
-
-	binding := sessionBinding{
-		role:    role,
-		backend: backend,
-		session: session,
-	}
+	binding := sessionBinding{role: role, backend: backend, session: session}
 	if err := r.appendTransition("session_created", 0, role, backend, session.SessionName()); err != nil {
 		return sessionBinding{}, err
 	}
@@ -158,21 +147,16 @@ func (r *runner) startSessions() error {
 		if err := r.checkSideChannelError(); err != nil {
 			return err
 		}
-
-		var rolePrompt string
-		switch binding.role {
-		case RoleImplementer:
-			rolePrompt = ImplementerRolePrompt
-		case RoleReviewer:
-			rolePrompt = ReviewerRolePrompt
-		default:
-			return fmt.Errorf("unknown role %q", binding.role)
+		if err := binding.session.Start(); err != nil {
+			if captureErr := r.writeFailureCapture(0, binding.role, err); captureErr != nil {
+				err = errors.Join(err, captureErr)
+			}
+			if transitionErr := r.appendTransition("startup_failed", 0, binding.role, binding.backend, ""); transitionErr != nil {
+				err = errors.Join(err, transitionErr)
+			}
+			return r.decorateRoleError(binding.role, "startup", err)
 		}
-		if r.sideChannel != nil {
-			rolePrompt = r.sideChannel.BuildStartupPrompt(binding.role, rolePrompt)
-		}
-
-		if err := binding.session.Start(rolePrompt); err != nil {
+		if err := binding.session.WaitUntilReady(); err != nil {
 			if captureErr := r.writeFailureCapture(0, binding.role, err); captureErr != nil {
 				err = errors.Join(err, captureErr)
 			}
@@ -184,7 +168,6 @@ func (r *runner) startSessions() error {
 		if r.sideChannel != nil {
 			r.sideChannel.MarkReady(binding.role)
 		}
-
 		if err := r.appendTransition("session_started", 0, binding.role, binding.backend, ""); err != nil {
 			return err
 		}
@@ -193,7 +176,7 @@ func (r *runner) startSessions() error {
 }
 
 func (r *runner) writeMetadata() error {
-	return r.artifacts.WriteMetadata(RunMetadata{
+	return r.artifacts.WriteMetadata(runMetadata{
 		RunID:              r.runID,
 		Task:               r.cfg.Task,
 		Implementer:        r.cfg.Implementer,
@@ -201,15 +184,9 @@ func (r *runner) writeMetadata() error {
 		MaxIterations:      r.cfg.MaxIterations,
 		IdleTimeoutSeconds: int64(r.cfg.IdleTimeout / time.Second),
 		CreatedAt:          time.Now().UTC(),
-		Sessions: map[string]SessionMetadata{
-			RoleImplementer: {
-				Backend:         r.implementer.backend,
-				TmuxSessionName: r.implementer.session.SessionName(),
-			},
-			RoleReviewer: {
-				Backend:         r.reviewer.backend,
-				TmuxSessionName: r.reviewer.session.SessionName(),
-			},
+		Sessions: map[string]sessionMetadata{
+			roleImplementer: {Backend: r.implementer.backend, TmuxSessionName: r.implementer.session.SessionName()},
+			roleReviewer:    {Backend: r.reviewer.backend, TmuxSessionName: r.reviewer.session.SessionName()},
 		},
 	})
 }
@@ -218,10 +195,9 @@ func (r *runner) executeTurn(iteration int, binding sessionBinding, prompt strin
 	if err := r.checkSideChannelError(); err != nil {
 		return "", err
 	}
-
 	printBanner(r.cfg.Stdout, bannerTitle(iteration, strings.ToUpper(binding.role), binding.backend))
 
-	result, err := binding.session.RunTurn(prompt)
+	result, err := runAgentTurn(binding.session, binding.role, prompt, r.cfg.IdleTimeout, 250*time.Millisecond)
 	if err != nil {
 		if captureErr := r.writeFailureCapture(iteration, binding.role, err); captureErr != nil {
 			err = errors.Join(err, captureErr)
@@ -234,16 +210,13 @@ func (r *runner) executeTurn(iteration int, binding sessionBinding, prompt strin
 	if err := r.checkSideChannelError(); err != nil {
 		return "", err
 	}
-
 	writeTurnOutput(r.cfg.Stdout, result.Output)
-
 	if err := r.artifacts.WriteCapture(successCaptureName(iteration, binding.role), result.RawCapture); err != nil {
 		return "", err
 	}
 	if err := r.appendTransition("turn_completed", iteration, binding.role, binding.backend, ""); err != nil {
 		return "", err
 	}
-
 	return result.Output, nil
 }
 
@@ -252,7 +225,6 @@ func (r *runner) finish(status string, iterations int, implementation string, ca
 		cause = errors.Join(cause, sideChannelErr)
 		status = resultStatusFailed
 	}
-
 	if stopErr := r.stopCommunicationChannelManagers(); stopErr != nil {
 		cause = errors.Join(cause, stopErr)
 		status = resultStatusFailed
@@ -261,50 +233,43 @@ func (r *runner) finish(status string, iterations int, implementation string, ca
 		cause = errors.Join(cause, sideChannelErr)
 		status = resultStatusFailed
 	}
-
 	if closeErr := r.closeSessions(); closeErr != nil {
 		cause = errors.Join(cause, closeErr)
 		status = resultStatusFailed
 	}
-
 	if removeErr := r.removeCommunicationChannelManagers(); removeErr != nil {
 		cause = errors.Join(cause, removeErr)
 		status = resultStatusFailed
 	}
-
 	if cause != nil {
 		if transitionErr := r.appendTransition("failed", iterations, "", "", cause.Error()); transitionErr != nil {
 			cause = errors.Join(cause, transitionErr)
 		}
 	}
-
 	if r.artifacts != nil {
 		result := r.resultFor(status, iterations, implementation, cause)
 		if err := r.artifacts.WriteResult(result); err != nil {
 			cause = errors.Join(cause, err)
-			status = resultStatusFailed
 		}
 	}
-
 	if cause != nil {
 		writeRuntimeError(r.cfg.Stderr, cause)
-		return NewExitError(1, true, cause)
+		return newExitError(1, true, cause)
 	}
-
 	switch status {
 	case resultStatusApproved:
 		r.writeSuccessSummary(iterations, implementation)
 		return nil
 	case resultStatusNonConverged:
 		r.writeNonConvergenceSummary(iterations)
-		return NewExitError(1, true, nil)
+		return newExitError(1, true, nil)
 	default:
-		return NewExitError(1, true, nil)
+		return newExitError(1, true, nil)
 	}
 }
 
-func (r *runner) resultFor(status string, iterations int, implementation string, cause error) RunResult {
-	result := RunResult{
+func (r *runner) resultFor(status string, iterations int, implementation string, cause error) runResult {
+	result := runResult{
 		RunID:               r.runID,
 		Status:              status,
 		Approved:            status == resultStatusApproved,
@@ -342,7 +307,7 @@ func (r *runner) appendTransition(state string, iteration int, role string, back
 	if r.artifacts == nil {
 		return nil
 	}
-	return r.artifacts.AppendTransition(StateTransition{
+	return r.artifacts.AppendTransition(stateTransition{
 		At:        time.Now().UTC(),
 		State:     state,
 		Iteration: iteration,
@@ -356,15 +321,14 @@ func (r *runner) writeFailureCapture(iteration int, role string, err error) erro
 	if r.artifacts == nil {
 		return nil
 	}
-	var sessionErr SessionError
-	if !errors.As(err, &sessionErr) || sessionErr == nil || sessionErr.Capture() == "" {
-		return nil
+	if agentErr, ok := agentpkg.AsAgentError(err); ok && agentErr.Capture != "" {
+		suffix := agentErr.Kind
+		if suffix == "" {
+			suffix = "capture"
+		}
+		return r.artifacts.WriteCapture(failureCaptureName(iteration, role, suffix), agentErr.Capture)
 	}
-	suffix := sessionErr.Kind()
-	if suffix == "" {
-		suffix = "capture"
-	}
-	return r.artifacts.WriteCapture(failureCaptureName(iteration, role, suffix), sessionErr.Capture())
+	return nil
 }
 
 func (r *runner) decorateRoleError(role string, action string, err error) error {
@@ -425,9 +389,9 @@ func bannerTitle(iteration int, role string, backend string) string {
 
 func (r *runner) startCommunicationChannelManagers() error {
 	paths := []string{toReviewerPipePath, toImplementerPipePath}
-	managers := make([]ChannelManager, 0, len(paths))
+	managers := make([]channelManager, 0, len(paths))
 	for _, path := range paths {
-		manager, err := r.cfg.NewCommunicationChannelManager(ChannelConfig{Path: path})
+		manager, err := r.cfg.NewCommunicationChannelManager(channelConfig{Path: path})
 		if err != nil {
 			for _, created := range managers {
 				_ = created.Stop()
@@ -445,35 +409,30 @@ func (r *runner) startSideChannelLoop() {
 	if len(r.communicationChannelManagers) == 0 {
 		return
 	}
-
-	r.sideChannel = newSideChannelCoordinator(r.artifacts, map[string]Session{
-		RoleImplementer: r.implementer.session,
-		RoleReviewer:    r.reviewer.session,
+	r.sideChannel = newSideChannelCoordinator(r.artifacts, map[string]workflowAgent{
+		roleImplementer: r.implementer.session,
+		roleReviewer:    r.reviewer.session,
 	})
 	r.sideChannelErrs = make(chan error, 1)
 	r.sideChannelDone = make(chan struct{})
 	r.sideChannelStop = make(chan struct{})
-	mergedMessages := make(chan ChannelMessage, len(r.communicationChannelManagers))
+	mergedMessages := make(chan channelMessage, len(r.communicationChannelManagers))
 	mergedErrs := make(chan error, len(r.communicationChannelManagers))
 	var forwarders sync.WaitGroup
-
 	for _, manager := range r.communicationChannelManagers {
 		forwarders.Add(1)
-		go func(manager ChannelManager) {
+		go func(manager channelManager) {
 			defer forwarders.Done()
 			forwardCommunicationChannel(manager, mergedMessages, mergedErrs, r.sideChannelStop)
 		}(manager)
 	}
-
 	go func() {
 		forwarders.Wait()
 		close(mergedMessages)
 		close(mergedErrs)
 	}()
-
 	go func() {
 		defer close(r.sideChannelDone)
-
 		messages := mergedMessages
 		errs := mergedErrs
 		for messages != nil || errs != nil {
@@ -506,7 +465,7 @@ func (r *runner) startSideChannelLoop() {
 	}()
 }
 
-func forwardCommunicationChannel(manager ChannelManager, messages chan<- ChannelMessage, errs chan<- error, stop <-chan struct{}) {
+func forwardCommunicationChannel(manager channelManager, messages chan<- channelMessage, errs chan<- error, stop <-chan struct{}) {
 	managerMessages := manager.Messages()
 	managerErrs := manager.Errors()
 	for managerMessages != nil || managerErrs != nil {
@@ -563,16 +522,7 @@ func (r *runner) recordReaderError(err error) error {
 	if r.artifacts == nil {
 		return nil
 	}
-
-	event := ChannelEvent{
-		At:     time.Now().UTC(),
-		Status: ChannelStatusReaderError,
-	}
-	var readerErr *ChannelReaderError
-	if errors.As(err, &readerErr) && readerErr != nil {
-		event.ChannelPath = readerErr.Path
-	}
-	return r.artifacts.AppendChannelEvent(event)
+	return r.artifacts.AppendChannelEvent(readerEventFromError(err))
 }
 
 func (r *runner) stopCommunicationChannelManagers() error {
@@ -623,4 +573,39 @@ func (r *runner) removeCommunicationChannelManagers() error {
 		return fmt.Errorf("side-channel cleanup failed: %w", removeErr)
 	}
 	return nil
+}
+
+func defaultRunConfig(cfg runConfig) runConfig {
+	if cfg.Stdout == nil {
+		cfg.Stdout = io.Discard
+	}
+	if cfg.Stderr == nil {
+		cfg.Stderr = io.Discard
+	}
+	return cfg
+}
+
+func validateRunConfig(cfg runConfig) error {
+	switch {
+	case cfg.Task == "":
+		return errors.New("task must not be empty")
+	case cfg.Implementer == "":
+		return errors.New("implementer backend must not be empty")
+	case cfg.Reviewer == "":
+		return errors.New("reviewer backend must not be empty")
+	case cfg.MaxIterations < 1:
+		return errors.New("max iterations must be >= 1")
+	case cfg.IdleTimeout <= 0:
+		return errors.New("idle timeout must be > 0")
+	case cfg.NewAgent == nil:
+		return errors.New("NewAgent must not be nil")
+	case cfg.NewArtifactWriter == nil:
+		return errors.New("NewArtifactWriter must not be nil")
+	case cfg.NewCommunicationChannelManager == nil:
+		return errors.New("NewCommunicationChannelManager must not be nil")
+	case cfg.NewRunID == nil:
+		return errors.New("NewRunID must not be nil")
+	default:
+		return nil
+	}
 }
