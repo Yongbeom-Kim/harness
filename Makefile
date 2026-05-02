@@ -6,6 +6,11 @@ PATH_EXPORT := export PATH="$(ROOT)/bin:$$PATH"
 
 setup:
 	ln -sfn "$(ROOT)/scripts/.agentrc" "$$HOME/.agentrc"
+	@if [ -e "$$HOME/.agent-bin" ] && [ ! -L "$$HOME/.agent-bin" ]; then \
+		echo '$$HOME/.agent-bin already exists and is not a symlink; move it aside or replace it manually' >&2; \
+		exit 1; \
+	fi
+	ln -sfn "$(ROOT)/scripts/bin" "$$HOME/.agent-bin"
 
 build:
 	@mkdir -p "$(ROOT)/bin"

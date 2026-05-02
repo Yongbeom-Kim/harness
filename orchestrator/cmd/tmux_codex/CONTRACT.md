@@ -7,7 +7,7 @@ The supported operator-facing harness binaries are exactly:
 - `tmux_codex`
 - `tmux_claude`
 
-This file documents the `tmux_codex` member of that launcher-only surface. No workflow binary or historical run artifact contract remains part of the active product surface.
+This file documents the `tmux_codex` member of that launcher-only surface and the shared launch-environment behavior used by both launchers. No workflow binary or historical run artifact contract remains part of the active product surface.
 
 ## Purpose
 
@@ -17,7 +17,7 @@ The command:
 
 - creates a tmux session
 - gets the default pane from that session
-- sends a launcher command that sources `$HOME/.agentrc` before starting `codex`
+- sends a launcher command that sources `$HOME/.agentrc`, prepends `~/.agent-bin` to `PATH`, and starts `codex`
 - waits until Codex is ready for input
 - optionally attaches the current command IO streams to the tmux session
 
@@ -57,6 +57,8 @@ The command exits with code `2` and prints an error to `stderr` when:
 
 `-h` exits with code `0`.
 
+The shared launcher environment validates `~/.agent-bin` before sending the backend command into tmux. Startup fails as a runtime launch error if `~/.agent-bin` is missing or is not a directory. Validation only checks that the resolved path exists and is a directory; it does not require a symlink, a repo-owned target, or any specific helper command inside the directory.
+
 ## Runtime Model
 
 ### Session creation
@@ -66,14 +68,25 @@ The command creates a tmux session using the requested session name.
 It then requests the session's first pane and sends a sourced launcher command equivalent to:
 
 ```sh
-bash -lc 'if [ -f "$HOME/.agentrc" ]; then . "$HOME/.agentrc"; fi; stty -echo; '"'"'codex'"'"''
+bash -lc 'if [ -f "$HOME/.agentrc" ]; then . "$HOME/.agentrc"; fi; export PATH='"'"'/Users/example/.agent-bin'"'"':"$PATH"; stty -echo; '"'"'codex'"'"''
 ```
 
-The launcher contract is:
+The shared launcher contract for `tmux_codex` and `tmux_claude` is:
 
 - source `$HOME/.agentrc` if present
+- prepend `~/.agent-bin` to `PATH`
 - disable local terminal echo with `stty -echo`
-- start `codex`
+- start the backend command
+
+The emitted `PATH` entry uses the resolved absolute path for `~/.agent-bin`; it does not emit a literal `~` path. Because the prepend happens after `.agentrc` is sourced, `~/.agent-bin` takes precedence even when `.agentrc` also changes `PATH`. Command shadowing is allowed and there is no collision detection.
+
+### Setup behavior
+
+`make setup` is the recommended repo-backed setup flow. It links `$HOME/.agentrc` to the repo-managed `scripts/.agentrc` and creates or refreshes `$HOME/.agent-bin` as a symlink to the repo-managed `scripts/bin`.
+
+`~/.agent-bin` remains operator-owned. `make setup` fails with clear guidance if that path already exists as a non-symlink file or directory, and launcher runtime does not require the directory to point back to this repo.
+
+The launcher CLI surface is unchanged for both supported binaries: `--session` and `--attach` remain the only launcher flags, and there are no PATH-injection flags or positional arguments.
 
 ### Attach behavior
 
@@ -110,17 +123,18 @@ Exit code: `0` when attach returns successfully.
 
 ### Runtime failure output
 
-If tmux session creation, pane creation, launcher send, readiness wait, or attach fails:
+If tmux session creation, pane creation, launch-environment validation, launcher send, readiness wait, or attach fails:
 
 - the command exits with code `1`
 - the failure is printed to `stderr`
 
-If pane creation or launcher send fails after the tmux session is opened, the command attempts to close the session before returning the failure.
+If pane creation, launch-environment validation, or launcher send fails after the tmux session is opened, the command attempts to close the session before returning the failure. Launch-environment validation failures occur before any backend command is sent into the pane.
 
 ## Failure Semantics
 
 - session creation failure is terminal
 - pane creation failure is terminal and triggers best-effort session cleanup
+- launch-environment validation failure is terminal and triggers best-effort session cleanup before backend startup
 - launcher send failure is terminal and triggers best-effort session cleanup
 - readiness failure is terminal and triggers best-effort session cleanup
 - attach failure is terminal

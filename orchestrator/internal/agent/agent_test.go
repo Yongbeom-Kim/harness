@@ -3,6 +3,8 @@ package agent
 import (
 	"errors"
 	"io"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -46,6 +48,7 @@ func TestAgentErrorCarriesKindSessionAndCapture(t *testing.T) {
 }
 
 func TestCodexAgentStartWaitSendCaptureClose(t *testing.T) {
+	setupAgentBin(t)
 	pane := &recordingPane{captures: []string{"OpenAI Codex\n› ", "OpenAI Codex\n› "}}
 	session := &fakeTmuxSession{name: "codex-session", pane: pane}
 	agent := NewCodexAgent("codex-session")
@@ -87,6 +90,7 @@ func TestCodexAgentStartWaitSendCaptureClose(t *testing.T) {
 }
 
 func TestClaudeAgentStartWaitSendCaptureClose(t *testing.T) {
+	setupAgentBin(t)
 	pane := &recordingPane{captures: []string{"Claude ready", "Claude ready"}}
 	session := &fakeTmuxSession{name: "claude-session", pane: pane}
 	agent := NewClaudeAgent("claude-session")
@@ -108,6 +112,63 @@ func TestClaudeAgentStartWaitSendCaptureClose(t *testing.T) {
 	}
 	if !strings.Contains(pane.joined(), "review") {
 		t.Fatalf("expected prompt to be sent, got %q", pane.joined())
+	}
+}
+
+func TestCodexAgentStartWrapsEnvPreflightError(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	pane := &recordingPane{}
+	session := &fakeTmuxSession{name: "codex-session", pane: pane}
+	agent := NewCodexAgent("codex-session")
+	agent.openSession = func(string) (tmux.TmuxSessionLike, error) { return session, nil }
+
+	err := agent.Start()
+	if err == nil {
+		t.Fatal("expected Start to fail")
+	}
+	var agentErr *AgentError
+	if !errors.As(err, &agentErr) {
+		t.Fatalf("expected AgentError, got %v", err)
+	}
+	if agentErr.Kind != ErrorKindLaunch {
+		t.Fatalf("expected launch error, got %s", agentErr.Kind)
+	}
+	if len(pane.calls) != 0 {
+		t.Fatalf("expected no pane send before preflight failure, got %q", pane.joined())
+	}
+	if session.closeCalls != 1 {
+		t.Fatalf("expected session cleanup, got %d close calls", session.closeCalls)
+	}
+}
+
+func TestClaudeAgentStartWrapsEnvPreflightError(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	if err := os.WriteFile(filepath.Join(home, ".agent-bin"), []byte("not a directory"), 0o600); err != nil {
+		t.Fatalf("write .agent-bin file: %v", err)
+	}
+	pane := &recordingPane{}
+	session := &fakeTmuxSession{name: "claude-session", pane: pane}
+	agent := NewClaudeAgent("claude-session")
+	agent.openSession = func(string) (tmux.TmuxSessionLike, error) { return session, nil }
+
+	err := agent.Start()
+	if err == nil {
+		t.Fatal("expected Start to fail")
+	}
+	var agentErr *AgentError
+	if !errors.As(err, &agentErr) {
+		t.Fatalf("expected AgentError, got %v", err)
+	}
+	if agentErr.Kind != ErrorKindLaunch {
+		t.Fatalf("expected launch error, got %s", agentErr.Kind)
+	}
+	if len(pane.calls) != 0 {
+		t.Fatalf("expected no pane send before preflight failure, got %q", pane.joined())
+	}
+	if session.closeCalls != 1 {
+		t.Fatalf("expected session cleanup, got %d close calls", session.closeCalls)
 	}
 }
 
@@ -176,3 +237,12 @@ var (
 	_ tmux.TmuxSessionLike = (*fakeTmuxSession)(nil)
 	_ tmux.TmuxPaneLike    = (*recordingPane)(nil)
 )
+
+func setupAgentBin(t *testing.T) {
+	t.Helper()
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	if err := os.Mkdir(filepath.Join(home, ".agent-bin"), 0o755); err != nil {
+		t.Fatalf("mkdir .agent-bin: %v", err)
+	}
+}

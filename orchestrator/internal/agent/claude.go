@@ -6,7 +6,7 @@ import (
 	"sync"
 	"time"
 
-	agentshell "github.com/Yongbeom-Kim/harness/orchestrator/internal/agent/shell"
+	agentenv "github.com/Yongbeom-Kim/harness/orchestrator/internal/agent/env"
 	"github.com/Yongbeom-Kim/harness/orchestrator/internal/agent/tmux"
 )
 
@@ -53,7 +53,12 @@ func (a *ClaudeAgent) Start() error {
 		_ = session.Close()
 		return NewAgentError(ErrorKindLaunch, a.sessionName, "", err)
 	}
-	if err := pane.SendText(agentshell.BuildLaunchCommand(a.launchCommand)); err != nil {
+	launchText, err := agentenv.BuildLaunchCommand(a.launchCommand)
+	if err != nil {
+		_ = session.Close()
+		return NewAgentError(ErrorKindLaunch, a.sessionName, "", err)
+	}
+	if err := pane.SendText(launchText); err != nil {
 		_ = session.Close()
 		return NewAgentError(ErrorKindLaunch, a.sessionName, "", err)
 	}
