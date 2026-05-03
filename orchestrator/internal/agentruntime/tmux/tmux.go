@@ -154,16 +154,24 @@ type TmuxPane struct {
 	session *TmuxSession
 }
 
-func (p *TmuxPane) SendText(text string) error {
+func (p *TmuxPane) targetName() (string, error) {
 	if p == nil {
-		return fmt.Errorf("nil TmuxPane")
+		return "", fmt.Errorf("nil TmuxPane")
 	}
 	t := p.target
 	if t == "" && p.session != nil {
 		t = p.session.Name()
 	}
 	if t == "" {
-		return fmt.Errorf("tmux pane: empty target and no session name")
+		return "", fmt.Errorf("tmux pane: empty target and no session name")
+	}
+	return t, nil
+}
+
+func (p *TmuxPane) SendText(text string) error {
+	t, err := p.targetName()
+	if err != nil {
+		return err
 	}
 	bufPrefix := "pane"
 	if p.session != nil {
@@ -176,22 +184,24 @@ func (p *TmuxPane) SendText(text string) error {
 	if _, err := runTmuxCommand("tmux", "paste-buffer", "-d", "-p", "-b", bufferName, "-t", t); err != nil {
 		return &PasteBufferError{Target: t, BufferName: bufferName, Err: err}
 	}
-	if _, err := runTmuxCommand("tmux", "send-keys", "-t", t, "Enter"); err != nil {
-		return &SendKeysError{Target: t, Keys: []string{"Enter"}, Err: err}
+	return nil
+}
+
+func (p *TmuxPane) PressKey(key string) error {
+	t, err := p.targetName()
+	if err != nil {
+		return err
+	}
+	if _, err := runTmuxCommand("tmux", "send-keys", "-t", t, key); err != nil {
+		return &SendKeysError{Target: t, Keys: []string{key}, Err: err}
 	}
 	return nil
 }
 
 func (p *TmuxPane) Capture() (string, error) {
-	if p == nil {
-		return "", fmt.Errorf("nil TmuxPane")
-	}
-	t := p.target
-	if t == "" && p.session != nil {
-		t = p.session.Name()
-	}
-	if t == "" {
-		return "", fmt.Errorf("tmux pane: empty target and no session name")
+	t, err := p.targetName()
+	if err != nil {
+		return "", err
 	}
 	r, err := runTmuxCommand("tmux", "capture-pane", "-p", "-J", "-S", captureHistoryStart, "-t", t)
 	if err != nil {
@@ -204,14 +214,11 @@ func (p *TmuxPane) Close() error {
 	if p == nil {
 		return nil
 	}
-	t := p.target
-	if t == "" && p.session != nil {
-		t = p.session.Name()
+	t, err := p.targetName()
+	if err != nil {
+		return err
 	}
-	if t == "" {
-		return fmt.Errorf("tmux pane: empty target and no session name")
-	}
-	_, err := runTmuxCommand("tmux", "kill-pane", "-t", t)
+	_, err = runTmuxCommand("tmux", "kill-pane", "-t", t)
 	if err == nil {
 		return nil
 	}

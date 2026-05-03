@@ -43,7 +43,10 @@ Protocol markers:
 
 Protocol rules:
 - Begin implementation immediately.
+- The Go harness owns all mkpipe listeners and delivers inbound peer messages into this chat.
+- Do not create, open, tail, read from, or listen on any mkpipe yourself.
 - When the change is reviewable, write to the reviewer mkpipe at %s.
+- Your only mkpipe responsibility is writing outbound messages to that reviewer mkpipe path.
 - Every mkpipe message must start with exactly one protocol marker on line 1.
 - Use %s when handing off a reviewable implementation and summarize what changed.
 - If the reviewer responds with %s, make the requested changes and send another %s handoff.
@@ -69,9 +72,12 @@ Protocol markers:
 - %s
 
 Protocol rules:
-- Do not produce an immediate review. Wait for the implementer to notify you through mkpipe first.
+- Do not produce an immediate review. Wait for the implementer handoff to be delivered into this chat by the harness first.
+- The Go harness owns all mkpipe listeners and delivers inbound peer messages into this chat.
+- Do not create, open, tail, read from, or listen on any mkpipe yourself.
 - Expect implementer handoff messages to start with %s.
 - Respond to reviewable changes by writing back to the implementer mkpipe at %s.
+- Your only mkpipe responsibility is writing outbound messages to that implementer mkpipe path.
 - Use %s when approval is withheld and include specific actionable feedback.
 - Use %s for terminal approval; after sending it both agents remain idle for human follow-up.
 - If you are blocked, ask the implementer first through mkpipe with %s.

@@ -31,6 +31,10 @@ func codexReady(capture string) bool {
 	return strings.Contains(capture, "Welcome to Codex") && strings.Contains(capture, "\n› ")
 }
 
-func (Codex) SendPrompt(pane tmux.TmuxPaneLike, prompt string) error {
-	return sendPrompt(pane, prompt)
+func (Codex) SendPromptNow(pane tmux.TmuxPaneLike, prompt string) error {
+	return sendTextAndKeys(pane, prompt, "Enter")
+}
+
+func (Codex) SendPromptQueued(pane tmux.TmuxPaneLike, prompt string) error {
+	return sendTextAndKeys(pane, prompt, "Tab")
 }

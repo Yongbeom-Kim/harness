@@ -69,7 +69,7 @@ Inside that session:
 - the implementer runtime uses the default pane
 - the reviewer runtime uses the second pane returned by `NewPane()`
 
-The command starts both runtimes before starting either runtime-owned mkpipe. It starts both mkpipes before sending either initial prompt.
+The command starts the two runtimes sequentially. Each runtime starts its own runtime-owned mkpipe as part of `Start()`. No seeded prompt is sent until both runtimes have started successfully and both resolved mkpipe paths are known.
 
 ### Seeded protocol
 
@@ -91,6 +91,8 @@ The reviewer prompt includes:
 - the exact protocol markers
 - the instruction to wait for implementer handoff before reviewing
 
+The command sends both seeded prompts with immediate backend semantics only after both runtimes have started and both resolved peer mkpipe paths are known.
+
 The exact protocol markers are:
 
 - `[IWR_IMPLEMENTATION_READY]`
@@ -107,6 +109,9 @@ Each runtime owns one attach-scoped mkpipe listener.
 - the implementer default mkpipe basename is `.<sanitized-session-name>-implementer.mkpipe`
 - the reviewer default mkpipe basename is `.<sanitized-session-name>-reviewer.mkpipe`
 - seeded prompts receive the resolved absolute peer paths
+- seeded bootstrap sends are immediate; later mkpipe traffic is queued and backend-specific
+- the runtime forwards each mkpipe message directly into the queued-send path with no harness-owned retry, reorder, buffering, or idle-wait queue
+- Claude has no native queued CLI gesture, so queued delivery is cooperative emulation via `Do this after all your pending tasks:\n\n<prompt>`
 
 Before attach begins, runtime mkpipe errors are treated as bootstrap-fatal. After attach begins, mkpipe delivery failures are logged and dropped. When attach returns, both runtime mkpipes stop, the lock is released, and the tmux session remains alive.
 

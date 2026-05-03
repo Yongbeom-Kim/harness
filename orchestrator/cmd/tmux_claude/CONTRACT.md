@@ -87,6 +87,8 @@ If `--attach` is provided, the command calls tmux attach against the created ses
 
 If `--mkpipe` is provided, the launcher waits for backend readiness before creating the FIFO listener, opens the tmux attach handle before printing the mkpipe banner, and keeps the listener alive only for the attached launcher process. There is no detached helper, headless persistence, or supervisor process.
 
+Each normalized mkpipe message is forwarded directly into the backend's queued-send path rather than sent immediately. The harness does not add its own retry, reorder, buffering, or idle-wait queue. Queue behavior is backend-specific: Codex uses its queued gesture, Cursor uses its queued Enter path, and Claude has no native queue so the runtime pastes `Do this after all your pending tasks:\n\n<prompt>` and presses `Enter` as cooperative emulation.
+
 The attach path uses the configured command IO streams:
 
 - provided `stdin`
@@ -120,7 +122,7 @@ On successful launch with `--attach --mkpipe`, before tmux attach begins, the co
 Attaching Claude tmux session "<session-name>" with mkpipe "<absolute-fifo-path>"
 ```
 
-Runtime listener errors and delivery failures are logged to standard streams, the failed prompt is dropped, and the attached session continues.
+mkpipe traffic is queued and backend-specific rather than immediate. Runtime listener errors and queued delivery failures are logged to standard streams, the failed prompt is dropped, and the attached session continues.
 
 ### Runtime failure output
 
@@ -137,6 +139,7 @@ If tmux session creation, pane creation, launch-environment validation, launcher
 - launcher send failure is terminal and triggers best-effort session cleanup
 - readiness failure is terminal and triggers best-effort session cleanup
 - mkpipe startup failures, including missing parent directories, existing target paths, FIFO creation failures, and listener setup failures, are terminal
+- before attach begins, mkpipe delivery failures are terminal; after attach begins, runtime listener errors and queued delivery failures are logged and dropped
 - stale FIFOs from hard crashes are not cleaned up automatically and must be removed manually before the next mkpipe launch
 - attach failure is terminal
 - there is no fallback non-tmux execution mode

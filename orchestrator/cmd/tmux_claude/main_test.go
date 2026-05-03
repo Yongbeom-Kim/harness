@@ -30,6 +30,7 @@ func (l *fakeClaudeLock) Release() error {
 type fakeClaudePane struct{}
 
 func (p *fakeClaudePane) SendText(string) error    { return nil }
+func (p *fakeClaudePane) PressKey(string) error    { return nil }
 func (p *fakeClaudePane) Capture() (string, error) { return "", nil }
 func (p *fakeClaudePane) Close() error             { return nil }
 

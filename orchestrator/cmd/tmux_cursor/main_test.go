@@ -30,6 +30,7 @@ func (l *fakeCursorLock) Release() error {
 type fakeCursorPane struct{}
 
 func (p *fakeCursorPane) SendText(string) error    { return nil }
+func (p *fakeCursorPane) PressKey(string) error    { return nil }
 func (p *fakeCursorPane) Capture() (string, error) { return "", nil }
 func (p *fakeCursorPane) Close() error             { return nil }
 

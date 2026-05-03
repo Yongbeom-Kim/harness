@@ -33,6 +33,10 @@ func cursorReady(capture string) bool {
 	return strings.Contains(capture, "Cursor Agent")
 }
 
-func (Cursor) SendPrompt(pane tmux.TmuxPaneLike, prompt string) error {
-	return sendPrompt(pane, prompt)
+func (Cursor) SendPromptNow(pane tmux.TmuxPaneLike, prompt string) error {
+	return sendTextAndKeys(pane, prompt, "Enter", "Enter")
+}
+
+func (Cursor) SendPromptQueued(pane tmux.TmuxPaneLike, prompt string) error {
+	return sendTextAndKeys(pane, prompt, "Enter")
 }

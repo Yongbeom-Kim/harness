@@ -54,7 +54,7 @@ type workflowRuntime interface {
 	Start() (agentruntime.StartInfo, error)
 	MkpipeErrors() <-chan error
 	StopMkpipe() error
-	SendPrompt(string) error
+	SendPromptNow(string) error
 }
 
 func main() {
@@ -187,12 +187,12 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer, deps workflow
 		return 1
 	}
 
-	if err := implementerRuntime.SendPrompt(buildImplementerPrompt(parsed.prompt, reviewerPipePath, sessionName)); err != nil {
+	if err := implementerRuntime.SendPromptNow(buildImplementerPrompt(parsed.prompt, reviewerPipePath, sessionName)); err != nil {
 		cleanupWorkflowBootstrapFailure(tmuxSession, lock, stderr, implementerRuntime, reviewerRuntime)
 		fmt.Fprintln(stderr, err.Error())
 		return 1
 	}
-	if err := reviewerRuntime.SendPrompt(buildReviewerPrompt(parsed.prompt, implementerPipePath, sessionName)); err != nil {
+	if err := reviewerRuntime.SendPromptNow(buildReviewerPrompt(parsed.prompt, implementerPipePath, sessionName)); err != nil {
 		cleanupWorkflowBootstrapFailure(tmuxSession, lock, stderr, implementerRuntime, reviewerRuntime)
 		fmt.Fprintln(stderr, err.Error())
 		return 1

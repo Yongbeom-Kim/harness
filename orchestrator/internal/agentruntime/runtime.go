@@ -223,14 +223,22 @@ func (r *Runtime) startConfiguredMkpipe() error {
 	return nil
 }
 
-func (r *Runtime) SendPrompt(prompt string) error {
+func (r *Runtime) SendPromptNow(prompt string) error {
+	return r.sendPrompt(prompt, r.backend.SendPromptNow)
+}
+
+func (r *Runtime) SendPromptQueued(prompt string) error {
+	return r.sendPrompt(prompt, r.backend.SendPromptQueued)
+}
+
+func (r *Runtime) sendPrompt(prompt string, send func(tmux.TmuxPaneLike, string) error) error {
 	r.sendMu.Lock()
 	defer r.sendMu.Unlock()
 
 	if r.state != stateStarted || r.pane == nil {
 		return newError(ErrorKindCapture, r.SessionName(), "", fmt.Errorf("runtime has not started"))
 	}
-	if err := r.backend.SendPrompt(r.pane, prompt); err != nil {
+	if err := send(r.pane, prompt); err != nil {
 		return newError(ErrorKindCapture, r.SessionName(), "", err)
 	}
 	return nil
@@ -294,7 +302,7 @@ func (r *Runtime) startMkpipeForwarders(listener mkpipe.Listener) {
 	go func() {
 		defer r.mkpipeWG.Done()
 		for prompt := range listener.Messages() {
-			if err := r.SendPrompt(prompt); err != nil {
+			if err := r.SendPromptQueued(prompt); err != nil {
 				r.emitMkpipeError(fmt.Errorf("mkpipe delivery failed: %w", err))
 			}
 		}

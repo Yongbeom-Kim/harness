@@ -36,6 +36,7 @@ func (l *fakeWorkflowLock) Release() error {
 type fakeWorkflowPane struct{}
 
 func (p *fakeWorkflowPane) SendText(string) error    { return nil }
+func (p *fakeWorkflowPane) PressKey(string) error    { return nil }
 func (p *fakeWorkflowPane) Capture() (string, error) { return "", nil }
 func (p *fakeWorkflowPane) Close() error             { return nil }
 
@@ -72,17 +73,17 @@ func (s *fakeWorkflowSession) NewPane() (runtimetmux.TmuxPaneLike, error) {
 }
 
 type fakeWorkflowRuntime struct {
-	name            string
-	config          agentruntime.Config
-	startMkpipePath string
-	startErr        error
-	sendPromptErr   error
-	started         int
-	stopMkpipe      int
-	prompts         []string
-	mkpipeErrors    chan error
-	events          *[]string
-	eventPrefix     string
+	name             string
+	config           agentruntime.Config
+	startMkpipePath  string
+	startErr         error
+	sendPromptNowErr error
+	started          int
+	stopMkpipe       int
+	prompts          []string
+	mkpipeErrors     chan error
+	events           *[]string
+	eventPrefix      string
 }
 
 func (r *fakeWorkflowRuntime) SessionName() string { return r.name }
@@ -118,12 +119,12 @@ func (r *fakeWorkflowRuntime) StopMkpipe() error {
 	}
 	return nil
 }
-func (r *fakeWorkflowRuntime) SendPrompt(prompt string) error {
+func (r *fakeWorkflowRuntime) SendPromptNow(prompt string) error {
 	r.prompts = append(r.prompts, prompt)
 	if r.events != nil {
-		*r.events = append(*r.events, r.eventPrefix+"_prompt")
+		*r.events = append(*r.events, r.eventPrefix+"_prompt_now")
 	}
-	return r.sendPromptErr
+	return r.sendPromptNowErr
 }
 
 func TestRunBootstrapsSharedSessionStartsBothRuntimeMkpipesThenSeedsPrompts(t *testing.T) {
@@ -186,8 +187,8 @@ func TestRunBootstrapsSharedSessionStartsBothRuntimeMkpipesThenSeedsPrompts(t *t
 		"implementer_start_mkpipe",
 		"reviewer_start",
 		"reviewer_start_mkpipe",
-		"implementer_prompt",
-		"reviewer_prompt",
+		"implementer_prompt_now",
+		"reviewer_prompt_now",
 		"attach",
 		"implementer_stop_mkpipe",
 		"reviewer_stop_mkpipe",

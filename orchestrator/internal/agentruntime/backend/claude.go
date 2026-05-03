@@ -8,6 +8,8 @@ import (
 
 type Claude struct{}
 
+const claudeQueuedPromptPrefix = "Do this after all your pending tasks:\n\n"
+
 func (Claude) DefaultSessionName() string { return "claude" }
 
 func (Claude) Launch(pane tmux.TmuxPaneLike, buildLaunchCommand LaunchCommandBuilder) error {
@@ -29,6 +31,12 @@ func claudeReady(capture string) bool {
 	return strings.TrimSpace(capture) != ""
 }
 
-func (Claude) SendPrompt(pane tmux.TmuxPaneLike, prompt string) error {
-	return sendPrompt(pane, prompt)
+func (Claude) SendPromptNow(pane tmux.TmuxPaneLike, prompt string) error {
+	return sendTextAndKeys(pane, prompt, "Enter")
+}
+
+// Claude Code has no native queued-send gesture; this cooperative wrapper asks
+// Claude to defer the work itself instead of relying on true CLI queueing.
+func (Claude) SendPromptQueued(pane tmux.TmuxPaneLike, prompt string) error {
+	return sendTextAndKeys(pane, claudeQueuedPromptPrefix+prompt, "Enter")
 }

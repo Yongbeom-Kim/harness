@@ -3,6 +3,7 @@ package agentruntime
 import (
 	"errors"
 	"io"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -30,8 +31,10 @@ func (s *fakeSession) NewPane() (tmux.TmuxPaneLike, error) { return s.pane, nil 
 
 type fakePane struct {
 	sent        []string
+	keys        []string
 	captures    []string
 	sendErr     error
+	pressErr    error
 	captureErr  error
 	captureCall int
 	closeErr    error
@@ -43,6 +46,14 @@ func (p *fakePane) SendText(text string) error {
 		return p.sendErr
 	}
 	p.sent = append(p.sent, text)
+	return nil
+}
+
+func (p *fakePane) PressKey(key string) error {
+	if p.pressErr != nil {
+		return p.pressErr
+	}
+	p.keys = append(p.keys, key)
 	return nil
 }
 
@@ -120,9 +131,56 @@ func readyDeps(listener mkpipe.Listener, now *time.Time) deps {
 	}
 }
 
+type fakeBackend struct {
+	defaultSessionName string
+	launchFn           func(tmux.TmuxPaneLike, backend.LaunchCommandBuilder) error
+	waitUntilReadyFn   func(tmux.TmuxPaneLike, backend.ReadinessOptions) error
+	sendPromptNowFn    func(tmux.TmuxPaneLike, string) error
+	sendPromptQueuedFn func(tmux.TmuxPaneLike, string) error
+}
+
+func (b fakeBackend) DefaultSessionName() string {
+	if b.defaultSessionName != "" {
+		return b.defaultSessionName
+	}
+	return "fake"
+}
+
+func (b fakeBackend) Launch(pane tmux.TmuxPaneLike, buildLaunchCommand backend.LaunchCommandBuilder) error {
+	if b.launchFn != nil {
+		return b.launchFn(pane, buildLaunchCommand)
+	}
+	return nil
+}
+
+func (b fakeBackend) WaitUntilReady(pane tmux.TmuxPaneLike, opts backend.ReadinessOptions) error {
+	if b.waitUntilReadyFn != nil {
+		return b.waitUntilReadyFn(pane, opts)
+	}
+	return nil
+}
+
+func (b fakeBackend) SendPromptNow(pane tmux.TmuxPaneLike, prompt string) error {
+	if b.sendPromptNowFn != nil {
+		return b.sendPromptNowFn(pane, prompt)
+	}
+	return nil
+}
+
+func (b fakeBackend) SendPromptQueued(pane tmux.TmuxPaneLike, prompt string) error {
+	if b.sendPromptQueuedFn != nil {
+		return b.sendPromptQueuedFn(pane, prompt)
+	}
+	return nil
+}
+
 func newReadyRuntime(name string, pane *fakePane, now *time.Time) (*Runtime, *fakeSession) {
+	return newReadyRuntimeWithBackend(name, backend.Codex{}, pane, now)
+}
+
+func newReadyRuntimeWithBackend(name string, b backend.Backend, pane *fakePane, now *time.Time) (*Runtime, *fakeSession) {
 	session := &fakeSession{name: name, pane: pane}
-	rt := newRuntime(backend.Codex{}, session, pane, Config{SessionName: name})
+	rt := newRuntime(b, session, pane, Config{SessionName: name})
 	rt.deps = readyDeps(newFakeListener("/tmp/.runtime.mkpipe"), now)
 	return rt, session
 }
@@ -159,8 +217,11 @@ func TestRuntimeStartWaitsForQuietReadyState(t *testing.T) {
 	if pane.closed || session.closed {
 		t.Fatalf("pane.closed=%v session.closed=%v", pane.closed, session.closed)
 	}
-	if len(pane.sent) != 1 || pane.sent[0] != "launch codex" {
+	if !slices.Equal(pane.sent, []string{"launch codex"}) {
 		t.Fatalf("sent launch text = %v", pane.sent)
+	}
+	if !slices.Equal(pane.keys, []string{"Enter"}) {
+		t.Fatalf("pressed keys = %v, want [Enter]", pane.keys)
 	}
 }
 
@@ -183,25 +244,33 @@ func TestRuntimeStartReturnsStartupErrorAndClosesOnlyPane(t *testing.T) {
 	}
 }
 
-func TestRuntimeSendPromptCaptureAndCloseStateRules(t *testing.T) {
+func TestRuntimeSendPromptMethodsKeepStateErrors(t *testing.T) {
 	now := time.Unix(0, 0)
 	pane := &fakePane{captures: []string{"OpenAI Codex\n› ", "OpenAI Codex\n› ", "captured"}}
 	rt, session := newReadyRuntime("dev", pane, &now)
 
-	if err := rt.SendPrompt("before"); err == nil {
-		t.Fatal("SendPrompt before start error = nil")
-	}
+	assertRuntimeNotStartedError(t, rt.SendPromptNow("before"), "dev")
+	assertRuntimeNotStartedError(t, rt.SendPromptQueued("before"), "dev")
 	if _, err := rt.Capture(); err == nil {
 		t.Fatal("Capture before start error = nil")
 	}
 	if _, err := rt.Start(); err != nil {
 		t.Fatalf("Start() error = %v", err)
 	}
-	if err := rt.SendPrompt("hello"); err != nil {
-		t.Fatalf("SendPrompt() error = %v", err)
+	if err := rt.SendPromptNow("hello"); err != nil {
+		t.Fatalf("SendPromptNow() error = %v", err)
+	}
+	if err := rt.SendPromptQueued("later"); err != nil {
+		t.Fatalf("SendPromptQueued() error = %v", err)
 	}
 	if got, err := rt.Capture(); err != nil || got != "captured" {
 		t.Fatalf("Capture() = %q, %v; want captured, nil", got, err)
+	}
+	if !slices.Equal(pane.sent, []string{"launch codex", "hello", "later"}) {
+		t.Fatalf("sent = %v", pane.sent)
+	}
+	if !slices.Equal(pane.keys, []string{"Enter", "Enter", "Tab"}) {
+		t.Fatalf("keys = %v", pane.keys)
 	}
 	if err := rt.Close(); err != nil {
 		t.Fatalf("Close() error = %v", err)
@@ -209,12 +278,29 @@ func TestRuntimeSendPromptCaptureAndCloseStateRules(t *testing.T) {
 	if err := rt.Close(); err != nil {
 		t.Fatalf("second Close() error = %v", err)
 	}
+	assertRuntimeNotStartedError(t, rt.SendPromptNow("after"), "dev")
+	assertRuntimeNotStartedError(t, rt.SendPromptQueued("after"), "dev")
 	if !pane.closed || session.closed {
 		t.Fatalf("pane.closed=%v session.closed=%v", pane.closed, session.closed)
 	}
 }
 
-func TestRuntimeStartStartsConfiguredMkpipeUsesBasenameOverrideAndForwardsMessages(t *testing.T) {
+func assertRuntimeNotStartedError(t *testing.T, err error, sessionName string) {
+	t.Helper()
+
+	var runtimeErr *Error
+	if !errors.As(err, &runtimeErr) {
+		t.Fatalf("error = %#v, want *Error", err)
+	}
+	if runtimeErr.Kind != ErrorKindCapture || runtimeErr.SessionName != sessionName {
+		t.Fatalf("error = %#v, want capture error for %q", runtimeErr, sessionName)
+	}
+	if runtimeErr.Err == nil || !strings.Contains(runtimeErr.Err.Error(), "runtime has not started") {
+		t.Fatalf("wrapped error = %#v, want not-started message", runtimeErr.Err)
+	}
+}
+
+func TestRuntimeMkpipeForwardersUseQueuedSemanticsWithoutLocalBuffering(t *testing.T) {
 	now := time.Unix(0, 0)
 	pane := &fakePane{captures: []string{"OpenAI Codex\n› ", "OpenAI Codex\n› "}}
 	listener := newFakeListener("/abs/reviewer.pipe")
@@ -238,21 +324,15 @@ func TestRuntimeStartStartsConfiguredMkpipeUsesBasenameOverrideAndForwardsMessag
 		t.Fatalf("unexpected mkpipe config: %+v", gotConfig)
 	}
 
-	listener.messages <- "from pipe"
-	deadline := time.After(time.Second)
-	for {
-		if len(pane.sent) >= 2 {
-			break
-		}
-		select {
-		case <-deadline:
-			t.Fatalf("timed out waiting for forwarded prompt, sent=%v", pane.sent)
-		default:
-			time.Sleep(10 * time.Millisecond)
-		}
+	listener.messages <- "first from pipe"
+	listener.messages <- "second from pipe"
+	waitForPaneSends(t, pane, 3)
+
+	if got := pane.sent[1:]; !slices.Equal(got, []string{"first from pipe", "second from pipe"}) {
+		t.Fatalf("forwarded prompts = %v", got)
 	}
-	if got := pane.sent[1]; got != "from pipe" {
-		t.Fatalf("forwarded prompt = %q, want %q", got, "from pipe")
+	if got := pane.keys[1:]; !slices.Equal(got, []string{"Tab", "Tab"}) {
+		t.Fatalf("forwarded keys = %v, want queued Tab delivery", got)
 	}
 
 	if err := rt.StopMkpipe(); err != nil {
@@ -260,6 +340,20 @@ func TestRuntimeStartStartsConfiguredMkpipeUsesBasenameOverrideAndForwardsMessag
 	}
 	if err := rt.StopMkpipe(); err != nil {
 		t.Fatalf("second StopMkpipe() error = %v", err)
+	}
+}
+
+func waitForPaneSends(t *testing.T, pane *fakePane, want int) {
+	t.Helper()
+
+	deadline := time.After(time.Second)
+	for len(pane.sent) < want {
+		select {
+		case <-deadline:
+			t.Fatalf("timed out waiting for %d sends, got sent=%v keys=%v", want, pane.sent, pane.keys)
+		default:
+			time.Sleep(10 * time.Millisecond)
+		}
 	}
 }
 
@@ -277,6 +371,11 @@ func TestRuntimeMkpipeErrorsExposeAsyncDeliveryFailures(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Start() error = %v", err)
 	}
+	t.Cleanup(func() {
+		if err := rt.StopMkpipe(); err != nil {
+			t.Fatalf("StopMkpipe() error = %v", err)
+		}
+	})
 	if info.Mkpipe == nil || info.Mkpipe.Path != "/abs/runtime.pipe" {
 		t.Fatalf("Start() Mkpipe = %+v, want /abs/runtime.pipe", info.Mkpipe)
 	}
@@ -290,5 +389,77 @@ func TestRuntimeMkpipeErrorsExposeAsyncDeliveryFailures(t *testing.T) {
 		}
 	case <-time.After(time.Second):
 		t.Fatal("timed out waiting for mkpipe delivery error")
+	}
+
+	listener.errors <- errors.New("listener failed")
+	select {
+	case err := <-rt.MkpipeErrors():
+		if !strings.Contains(err.Error(), "listener failed") {
+			t.Fatalf("MkpipeErrors() = %v, want listener failure", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for mkpipe listener error")
+	}
+}
+
+func TestRuntimeSendMutexSerializesFullPromptSequence(t *testing.T) {
+	firstEntered := make(chan struct{})
+	releaseFirst := make(chan struct{})
+	firstSequenceDone := make(chan struct{})
+
+	testBackend := fakeBackend{
+		defaultSessionName: "codex",
+		sendPromptNowFn: func(pane tmux.TmuxPaneLike, prompt string) error {
+			close(firstEntered)
+			<-releaseFirst
+			if err := pane.SendText(prompt); err != nil {
+				return err
+			}
+			if err := pane.PressKey("Enter"); err != nil {
+				return err
+			}
+			close(firstSequenceDone)
+			return nil
+		},
+		sendPromptQueuedFn: func(pane tmux.TmuxPaneLike, prompt string) error {
+			select {
+			case <-firstSequenceDone:
+			default:
+				return errors.New("queued send entered before first sequence finished")
+			}
+			if err := pane.SendText(prompt); err != nil {
+				return err
+			}
+			return pane.PressKey("Tab")
+		},
+	}
+
+	pane := &fakePane{}
+	rt := newRuntime(testBackend, nil, pane, Config{SessionName: "dev"})
+	rt.state = stateStarted
+
+	errs := make(chan error, 2)
+	go func() { errs <- rt.SendPromptNow("first") }()
+	<-firstEntered
+
+	go func() { errs <- rt.SendPromptQueued("second") }()
+	select {
+	case err := <-errs:
+		t.Fatalf("send returned before first sequence released: %v", err)
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	close(releaseFirst)
+	for range 2 {
+		if err := <-errs; err != nil {
+			t.Fatalf("send error = %v", err)
+		}
+	}
+
+	if !slices.Equal(pane.sent, []string{"first", "second"}) {
+		t.Fatalf("sent = %v", pane.sent)
+	}
+	if !slices.Equal(pane.keys, []string{"Enter", "Tab"}) {
+		t.Fatalf("keys = %v", pane.keys)
 	}
 }

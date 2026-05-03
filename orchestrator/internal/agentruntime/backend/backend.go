@@ -13,7 +13,8 @@ type Backend interface {
 	DefaultSessionName() string
 	Launch(pane tmux.TmuxPaneLike, buildLaunchCommand LaunchCommandBuilder) error
 	WaitUntilReady(pane tmux.TmuxPaneLike, opts ReadinessOptions) error
-	SendPrompt(pane tmux.TmuxPaneLike, prompt string) error
+	SendPromptNow(pane tmux.TmuxPaneLike, prompt string) error
+	SendPromptQueued(pane tmux.TmuxPaneLike, prompt string) error
 }
 
 type ReadinessOptions struct {
@@ -51,14 +52,22 @@ func launchCommand(pane tmux.TmuxPaneLike, buildLaunchCommand LaunchCommandBuild
 	if err != nil {
 		return err
 	}
-	return pane.SendText(launchText)
+	return sendTextAndKeys(pane, launchText, "Enter")
 }
 
-func sendPrompt(pane tmux.TmuxPaneLike, prompt string) error {
+func sendTextAndKeys(pane tmux.TmuxPaneLike, text string, keys ...string) error {
 	if pane == nil {
 		return fmt.Errorf("backend prompt: nil tmux pane")
 	}
-	return pane.SendText(prompt)
+	if err := pane.SendText(text); err != nil {
+		return err
+	}
+	for _, key := range keys {
+		if err := pane.PressKey(key); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func waitUntilReady(pane tmux.TmuxPaneLike, ready func(string) bool, opts ReadinessOptions) error {

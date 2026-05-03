@@ -2,12 +2,15 @@ package backend
 
 import (
 	"errors"
+	"slices"
 	"testing"
 	"time"
 )
 
 type recordingPane struct {
 	sent        []string
+	keys        []string
+	calls       []string
 	captures    []string
 	captureErr  error
 	captureCall int
@@ -15,6 +18,13 @@ type recordingPane struct {
 
 func (p *recordingPane) SendText(text string) error {
 	p.sent = append(p.sent, text)
+	p.calls = append(p.calls, "text:"+text)
+	return nil
+}
+
+func (p *recordingPane) PressKey(key string) error {
+	p.keys = append(p.keys, key)
+	p.calls = append(p.calls, "key:"+key)
 	return nil
 }
 
@@ -52,11 +62,22 @@ func TestCodexDefaultsLaunchPromptAndReadyMatcher(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Launch() error = %v", err)
 	}
-	if err := b.SendPrompt(pane, "hello"); err != nil {
-		t.Fatalf("SendPrompt() error = %v", err)
+	if err := b.SendPromptNow(pane, "hello"); err != nil {
+		t.Fatalf("SendPromptNow() error = %v", err)
 	}
-	if got := pane.sent; len(got) != 2 || got[0] != "launch codex" || got[1] != "hello" {
-		t.Fatalf("pane sent = %v, want launch then prompt", got)
+	if err := b.SendPromptQueued(pane, "later"); err != nil {
+		t.Fatalf("SendPromptQueued() error = %v", err)
+	}
+	wantCalls := []string{
+		"text:launch codex",
+		"key:Enter",
+		"text:hello",
+		"key:Enter",
+		"text:later",
+		"key:Tab",
+	}
+	if !slices.Equal(pane.calls, wantCalls) {
+		t.Fatalf("pane calls = %v, want %v", pane.calls, wantCalls)
 	}
 	now := time.Unix(0, 0)
 	pane.captures = []string{"OpenAI Codex\n› ", "OpenAI Codex\n› "}
@@ -88,11 +109,22 @@ func TestClaudeDefaultsLaunchPromptAndReadyMatcher(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Launch() error = %v", err)
 	}
-	if err := b.SendPrompt(pane, "hello"); err != nil {
-		t.Fatalf("SendPrompt() error = %v", err)
+	if err := b.SendPromptNow(pane, "hello"); err != nil {
+		t.Fatalf("SendPromptNow() error = %v", err)
 	}
-	if got := pane.sent; len(got) != 2 || got[0] != "launch claude" || got[1] != "hello" {
-		t.Fatalf("pane sent = %v, want launch then prompt", got)
+	if err := b.SendPromptQueued(pane, "later"); err != nil {
+		t.Fatalf("SendPromptQueued() error = %v", err)
+	}
+	wantCalls := []string{
+		"text:launch claude",
+		"key:Enter",
+		"text:hello",
+		"key:Enter",
+		"text:Do this after all your pending tasks:\n\nlater",
+		"key:Enter",
+	}
+	if !slices.Equal(pane.calls, wantCalls) {
+		t.Fatalf("pane calls = %v, want %v", pane.calls, wantCalls)
 	}
 	now := time.Unix(0, 0)
 	pane.captures = []string{"Claude is ready", "Claude is ready"}
@@ -124,11 +156,23 @@ func TestCursorDefaultsLaunchPromptAndReadyMatcher(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Launch() error = %v", err)
 	}
-	if err := b.SendPrompt(pane, "hello"); err != nil {
-		t.Fatalf("SendPrompt() error = %v", err)
+	if err := b.SendPromptNow(pane, "hello"); err != nil {
+		t.Fatalf("SendPromptNow() error = %v", err)
 	}
-	if got := pane.sent; len(got) != 2 || got[0] != "launch agent" || got[1] != "hello" {
-		t.Fatalf("pane sent = %v, want launch then prompt", got)
+	if err := b.SendPromptQueued(pane, "later"); err != nil {
+		t.Fatalf("SendPromptQueued() error = %v", err)
+	}
+	wantCalls := []string{
+		"text:launch agent",
+		"key:Enter",
+		"text:hello",
+		"key:Enter",
+		"key:Enter",
+		"text:later",
+		"key:Enter",
+	}
+	if !slices.Equal(pane.calls, wantCalls) {
+		t.Fatalf("pane calls = %v, want %v", pane.calls, wantCalls)
 	}
 
 	now := time.Unix(0, 0)

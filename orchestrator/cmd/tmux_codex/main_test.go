@@ -30,6 +30,7 @@ func (l *fakeCodexLock) Release() error {
 type fakeCodexPane struct{}
 
 func (p *fakeCodexPane) SendText(string) error    { return nil }
+func (p *fakeCodexPane) PressKey(string) error    { return nil }
 func (p *fakeCodexPane) Capture() (string, error) { return "", nil }
 func (p *fakeCodexPane) Close() error             { return nil }
 
