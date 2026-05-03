@@ -71,30 +71,6 @@ func (e *SplitWindowError) Error() string {
 
 func (e *SplitWindowError) Unwrap() error { return e.Err }
 
-type LoadBufferError struct {
-	BufferName string
-	Err        error
-}
-
-func (e *LoadBufferError) Error() string {
-	return tmuxCommandErrorMessage("load-buffer", fmt.Sprintf("for buffer %q", e.BufferName), e.Err)
-}
-
-func (e *LoadBufferError) Unwrap() error { return e.Err }
-
-type PasteBufferError struct {
-	Target     string
-	BufferName string
-	Err        error
-}
-
-func (e *PasteBufferError) Error() string {
-	detail := fmt.Sprintf("for buffer %q to target %q", e.BufferName, e.Target)
-	return tmuxCommandErrorMessage("paste-buffer", detail, e.Err)
-}
-
-func (e *PasteBufferError) Unwrap() error { return e.Err }
-
 type SendKeysError struct {
 	Target string
 	Keys   []string

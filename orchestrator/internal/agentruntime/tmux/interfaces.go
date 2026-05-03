@@ -11,7 +11,7 @@ type TmuxSessionLike interface {
 }
 
 type TmuxPaneLike interface {
-	// SendText pastes text into the pane without submitting it.
+	// SendText injects text into the pane without submitting it.
 	SendText(text string) error
 	PressKey(key string) error
 	Capture() (string, error)

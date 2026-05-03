@@ -5,6 +5,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestTmuxCommandErrorsIncludeOperationName(t *testing.T) {
@@ -29,28 +30,11 @@ func TestTmuxSessionImplementsInterfaces(t *testing.T) {
 	var _ TmuxPaneLike = (*TmuxPane)(nil)
 }
 
-func TestTmuxPaneSendTextPastesWithoutImplicitEnter(t *testing.T) {
+func TestTmuxPaneSendTextUsesLiteralSendKeysWithoutImplicitEnter(t *testing.T) {
 	originalRun := runTmuxCommand
-	originalRunWithInput := runTmuxCommandWithInput
-	defer func() {
-		runTmuxCommand = originalRun
-		runTmuxCommandWithInput = originalRunWithInput
-	}()
+	defer func() { runTmuxCommand = originalRun }()
 
-	type inputCall struct {
-		input string
-		cmd   []string
-	}
-
-	var loadCalls []inputCall
 	var commands [][]string
-	runTmuxCommandWithInput = func(input string, name string, args ...string) (commandResult, error) {
-		loadCalls = append(loadCalls, inputCall{
-			input: input,
-			cmd:   append([]string{name}, args...),
-		})
-		return commandResult{}, nil
-	}
 	runTmuxCommand = func(name string, args ...string) (commandResult, error) {
 		commands = append(commands, append([]string{name}, args...))
 		return commandResult{}, nil
@@ -61,24 +45,111 @@ func TestTmuxPaneSendTextPastesWithoutImplicitEnter(t *testing.T) {
 		t.Fatalf("SendText() error = %v", err)
 	}
 
-	if len(loadCalls) != 1 {
-		t.Fatalf("loadCalls = %d, want 1", len(loadCalls))
+	want := []string{"tmux", "send-keys", "-l", "-t", "%7", "--", "hello"}
+	if len(commands) != 1 || !slices.Equal(commands[0], want) {
+		t.Fatalf("commands = %v, want only send-keys %v", commands, want)
 	}
-	loadCall := loadCalls[0]
-	if loadCall.input != "hello" {
-		t.Fatalf("load-buffer input = %q, want hello", loadCall.input)
-	}
-	if len(loadCall.cmd) != 5 || loadCall.cmd[0] != "tmux" || loadCall.cmd[1] != "load-buffer" || loadCall.cmd[2] != "-b" || loadCall.cmd[4] != "-" {
-		t.Fatalf("load-buffer command = %v", loadCall.cmd)
-	}
-	bufferName := loadCall.cmd[3]
-	if bufferName == "" {
-		t.Fatal("expected buffer name")
+}
+
+func TestTmuxPaneSendTextPreservesLiteralPayloads(t *testing.T) {
+	originalRun := runTmuxCommand
+	defer func() { runTmuxCommand = originalRun }()
+
+	var got []string
+	runTmuxCommand = func(name string, args ...string) (commandResult, error) {
+		got = append([]string{name}, args...)
+		return commandResult{}, nil
 	}
 
-	wantPaste := []string{"tmux", "paste-buffer", "-d", "-p", "-b", bufferName, "-t", "%7"}
-	if len(commands) != 1 || !slices.Equal(commands[0], wantPaste) {
-		t.Fatalf("commands = %v, want only paste-buffer %v", commands, wantPaste)
+	text := "--leading-dash\nsecond line"
+	pane := &TmuxPane{target: "%7"}
+	if err := pane.SendText(text); err != nil {
+		t.Fatalf("SendText() error = %v", err)
+	}
+
+	want := []string{"tmux", "send-keys", "-l", "-t", "%7", "--", text}
+	if !slices.Equal(got, want) {
+		t.Fatalf("command = %v, want %v", got, want)
+	}
+}
+
+func TestTmuxPaneSendTextChunksLargePayloadsOnRuneBoundaries(t *testing.T) {
+	originalRun := runTmuxCommand
+	defer func() { runTmuxCommand = originalRun }()
+
+	var commands [][]string
+	runTmuxCommand = func(name string, args ...string) (commandResult, error) {
+		commands = append(commands, append([]string{name}, args...))
+		return commandResult{}, nil
+	}
+
+	text := strings.Repeat("a", maxSendKeysChunkBytes-1) + "é" + strings.Repeat("b", maxSendKeysChunkBytes-2)
+	pane := &TmuxPane{target: "%7"}
+	if err := pane.SendText(text); err != nil {
+		t.Fatalf("SendText() error = %v", err)
+	}
+
+	if len(commands) != 2 {
+		t.Fatalf("commands = %d, want 2", len(commands))
+	}
+
+	var combined strings.Builder
+	for _, cmd := range commands {
+		if len(cmd) != 7 {
+			t.Fatalf("command = %v, want 7 args", cmd)
+		}
+		wantPrefix := []string{"tmux", "send-keys", "-l", "-t", "%7", "--"}
+		if !slices.Equal(cmd[:6], wantPrefix) {
+			t.Fatalf("command prefix = %v, want %v", cmd[:6], wantPrefix)
+		}
+		if len(cmd[6]) > maxSendKeysChunkBytes {
+			t.Fatalf("chunk length = %d, want <= %d", len(cmd[6]), maxSendKeysChunkBytes)
+		}
+		combined.WriteString(cmd[6])
+	}
+	if combined.String() != text {
+		t.Fatalf("combined payload = %q, want original text", combined.String())
+	}
+}
+
+func TestTmuxPanePressKeyWaitsOnceAfterSendText(t *testing.T) {
+	originalRun := runTmuxCommand
+	originalSleep := sleepBeforePressKey
+	defer func() {
+		runTmuxCommand = originalRun
+		sleepBeforePressKey = originalSleep
+	}()
+
+	var events []string
+	runTmuxCommand = func(name string, args ...string) (commandResult, error) {
+		switch {
+		case len(args) >= 2 && args[0] == "send-keys" && args[1] == "-l":
+			events = append(events, "text")
+		case len(args) >= 1 && args[0] == "send-keys":
+			events = append(events, "key:"+args[len(args)-1])
+		default:
+			events = append(events, "other")
+		}
+		return commandResult{}, nil
+	}
+	sleepBeforePressKey = func(d time.Duration) {
+		events = append(events, "sleep:"+d.String())
+	}
+
+	pane := &TmuxPane{target: "%7"}
+	if err := pane.SendText("hello"); err != nil {
+		t.Fatalf("SendText() error = %v", err)
+	}
+	if err := pane.PressKey("Tab"); err != nil {
+		t.Fatalf("PressKey(Tab) error = %v", err)
+	}
+	if err := pane.PressKey("Enter"); err != nil {
+		t.Fatalf("PressKey(Enter) error = %v", err)
+	}
+
+	want := []string{"text", "sleep:25ms", "key:Tab", "key:Enter"}
+	if !slices.Equal(events, want) {
+		t.Fatalf("events = %v, want %v", events, want)
 	}
 }
 

@@ -11,16 +11,21 @@ import (
 	"os/exec"
 	"strings"
 	"time"
+	"unicode/utf8"
 )
 
 const (
 	defaultCommandTimeout = 10 * time.Second
 	captureHistoryStart   = "-32768"
+	maxSendKeysChunkBytes = 4096
+	// Give the target TUI a moment to absorb literal text before a follow-up
+	// control key like Tab or Enter.
+	postSendTextKeyDelay = 25 * time.Millisecond
 )
 
 var (
-	runTmuxCommand          = runCommand
-	runTmuxCommandWithInput = runCommandWithInput
+	runTmuxCommand      = runCommand
+	sleepBeforePressKey = time.Sleep
 )
 
 type TmuxSession struct {
@@ -150,8 +155,9 @@ func defaultPaneTarget(sessionName string) string {
 }
 
 type TmuxPane struct {
-	target  string
-	session *TmuxSession
+	target              string
+	session             *TmuxSession
+	settleBeforeNextKey bool
 }
 
 func (p *TmuxPane) targetName() (string, error) {
@@ -173,16 +179,16 @@ func (p *TmuxPane) SendText(text string) error {
 	if err != nil {
 		return err
 	}
-	bufPrefix := "pane"
-	if p.session != nil {
-		bufPrefix = p.session.Name()
+	// We used to do it with tmux load-buffer paste-buffer -dpb, but it gives us flakiness
+	// Where the app is idle and doesn't accept the paste for some reason.
+	// send-keys, on the other hand, works reliably.
+	for _, chunk := range splitLiteralSendKeysText(text, maxSendKeysChunkBytes) {
+		if _, err := runTmuxCommand("tmux", "send-keys", "-l", "-t", t, "--", chunk); err != nil {
+			return &SendKeysError{Target: t, Keys: []string{chunk}, Err: err}
+		}
 	}
-	bufferName := fmt.Sprintf("%s-%d", bufPrefix, time.Now().UnixNano())
-	if _, err := runTmuxCommandWithInput(text, "tmux", "load-buffer", "-b", bufferName, "-"); err != nil {
-		return &LoadBufferError{BufferName: bufferName, Err: err}
-	}
-	if _, err := runTmuxCommand("tmux", "paste-buffer", "-d", "-p", "-b", bufferName, "-t", t); err != nil {
-		return &PasteBufferError{Target: t, BufferName: bufferName, Err: err}
+	if text != "" {
+		p.settleBeforeNextKey = true
 	}
 	return nil
 }
@@ -192,9 +198,13 @@ func (p *TmuxPane) PressKey(key string) error {
 	if err != nil {
 		return err
 	}
+	if p.settleBeforeNextKey && postSendTextKeyDelay > 0 {
+		sleepBeforePressKey(postSendTextKeyDelay)
+	}
 	if _, err := runTmuxCommand("tmux", "send-keys", "-t", t, key); err != nil {
 		return &SendKeysError{Target: t, Keys: []string{key}, Err: err}
 	}
+	p.settleBeforeNextKey = false
 	return nil
 }
 
@@ -226,6 +236,36 @@ func (p *TmuxPane) Close() error {
 		return nil
 	}
 	return &KillPaneError{Target: t, Err: err}
+}
+
+func splitLiteralSendKeysText(text string, maxBytes int) []string {
+	if text == "" {
+		return nil
+	}
+	if maxBytes <= 0 || len(text) <= maxBytes {
+		return []string{text}
+	}
+
+	chunks := make([]string, 0, len(text)/maxBytes+1)
+	for start := 0; start < len(text); {
+		end := start + maxBytes
+		if end >= len(text) {
+			chunks = append(chunks, text[start:])
+			break
+		}
+		for end > start && !utf8.RuneStart(text[end]) {
+			end--
+		}
+		if end == start {
+			end = len(text)
+			if limit := start + maxBytes; limit < len(text) {
+				end = limit
+			}
+		}
+		chunks = append(chunks, text[start:end])
+		start = end
+	}
+	return chunks
 }
 
 type commandResult struct {
