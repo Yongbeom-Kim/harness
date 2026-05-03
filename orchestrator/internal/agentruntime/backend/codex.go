@@ -3,7 +3,7 @@ package backend
 import (
 	"strings"
 
-	"github.com/Yongbeom-Kim/harness/orchestrator/internal/session/tmux"
+	"github.com/Yongbeom-Kim/harness/orchestrator/internal/agentruntime/tmux"
 )
 
 type Codex struct{}

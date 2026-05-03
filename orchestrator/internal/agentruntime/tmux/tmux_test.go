@@ -2,6 +2,7 @@ package tmux
 
 import (
 	"errors"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -26,4 +27,25 @@ func TestOpenTmuxSessionRejectsEmptyName(t *testing.T) {
 func TestTmuxSessionImplementsInterfaces(t *testing.T) {
 	var _ TmuxSessionLike = (*TmuxSession)(nil)
 	var _ TmuxPaneLike = (*TmuxPane)(nil)
+}
+
+func TestTmuxPaneCloseUsesKillPane(t *testing.T) {
+	original := runTmuxCommand
+	defer func() { runTmuxCommand = original }()
+
+	var got []string
+	runTmuxCommand = func(name string, args ...string) (commandResult, error) {
+		got = append([]string{name}, args...)
+		return commandResult{}, nil
+	}
+
+	pane := &TmuxPane{target: "%7"}
+	if err := pane.Close(); err != nil {
+		t.Fatalf("Close() error = %v", err)
+	}
+
+	want := []string{"tmux", "kill-pane", "-t", "%7"}
+	if !slices.Equal(got, want) {
+		t.Fatalf("command = %v, want %v", got, want)
+	}
 }

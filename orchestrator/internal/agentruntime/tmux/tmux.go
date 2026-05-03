@@ -18,6 +18,11 @@ const (
 	captureHistoryStart   = "-32768"
 )
 
+var (
+	runTmuxCommand          = runCommand
+	runTmuxCommandWithInput = runCommandWithInput
+)
+
 type TmuxSession struct {
 	name                string
 	target              string
@@ -28,7 +33,7 @@ func NewTmuxSession(name string) (*TmuxSession, error) {
 	if name == "" {
 		return nil, fmt.Errorf("tmux session name must not be empty")
 	}
-	if _, err := runCommand("tmux", "new-session", "-d", "-s", name); err != nil {
+	if _, err := runTmuxCommand("tmux", "new-session", "-d", "-s", name); err != nil {
 		return nil, &NewSessionError{SessionName: name, Err: err}
 	}
 	return &TmuxSession{name: name, target: defaultPaneTarget(name)}, nil
@@ -93,7 +98,7 @@ func (s *TmuxSession) Close() error {
 	if !exists {
 		return nil
 	}
-	_, err = runCommand("tmux", "kill-session", "-t", s.name)
+	_, err = runTmuxCommand("tmux", "kill-session", "-t", s.name)
 	if err == nil {
 		return nil
 	}
@@ -104,7 +109,7 @@ func (s *TmuxSession) Close() error {
 }
 
 func (s *TmuxSession) hasSession() (bool, error) {
-	_, err := runCommand("tmux", "has-session", "-t", s.name)
+	_, err := runTmuxCommand("tmux", "has-session", "-t", s.name)
 	if err == nil {
 		return true, nil
 	}
@@ -126,7 +131,7 @@ func (s *TmuxSession) NewPane() (TmuxPaneLike, error) {
 		s.defaultPaneReturned = true
 		return &TmuxPane{target: t, session: s}, nil
 	}
-	result, err := runCommand("tmux", "split-window", "-d", "-P", "-F", "#{pane_id}", "-t", t)
+	result, err := runTmuxCommand("tmux", "split-window", "-d", "-P", "-F", "#{pane_id}", "-t", t)
 	if err != nil {
 		return nil, &SplitWindowError{Target: t, Err: err}
 	}
@@ -165,13 +170,13 @@ func (p *TmuxPane) SendText(text string) error {
 		bufPrefix = p.session.Name()
 	}
 	bufferName := fmt.Sprintf("%s-%d", bufPrefix, time.Now().UnixNano())
-	if _, err := runCommandWithInput(text, "tmux", "load-buffer", "-b", bufferName, "-"); err != nil {
+	if _, err := runTmuxCommandWithInput(text, "tmux", "load-buffer", "-b", bufferName, "-"); err != nil {
 		return &LoadBufferError{BufferName: bufferName, Err: err}
 	}
-	if _, err := runCommand("tmux", "paste-buffer", "-d", "-p", "-b", bufferName, "-t", t); err != nil {
+	if _, err := runTmuxCommand("tmux", "paste-buffer", "-d", "-p", "-b", bufferName, "-t", t); err != nil {
 		return &PasteBufferError{Target: t, BufferName: bufferName, Err: err}
 	}
-	if _, err := runCommand("tmux", "send-keys", "-t", t, "Enter"); err != nil {
+	if _, err := runTmuxCommand("tmux", "send-keys", "-t", t, "Enter"); err != nil {
 		return &SendKeysError{Target: t, Keys: []string{"Enter"}, Err: err}
 	}
 	return nil
@@ -188,11 +193,32 @@ func (p *TmuxPane) Capture() (string, error) {
 	if t == "" {
 		return "", fmt.Errorf("tmux pane: empty target and no session name")
 	}
-	r, err := runCommand("tmux", "capture-pane", "-p", "-J", "-S", captureHistoryStart, "-t", t)
+	r, err := runTmuxCommand("tmux", "capture-pane", "-p", "-J", "-S", captureHistoryStart, "-t", t)
 	if err != nil {
 		return "", &CapturePaneError{Target: t, Err: err}
 	}
 	return r.stdout, nil
+}
+
+func (p *TmuxPane) Close() error {
+	if p == nil {
+		return nil
+	}
+	t := p.target
+	if t == "" && p.session != nil {
+		t = p.session.Name()
+	}
+	if t == "" {
+		return fmt.Errorf("tmux pane: empty target and no session name")
+	}
+	_, err := runTmuxCommand("tmux", "kill-pane", "-t", t)
+	if err == nil {
+		return nil
+	}
+	if _, ok := errors.AsType[*TmuxSessionAbsentError](err); ok {
+		return nil
+	}
+	return &KillPaneError{Target: t, Err: err}
 }
 
 type commandResult struct {

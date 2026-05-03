@@ -50,6 +50,26 @@ func TestStartResolvesDefaultAndExplicitPaths(t *testing.T) {
 	}
 }
 
+func TestStartUsesBasenameOverrideForSharedSessionRole(t *testing.T) {
+	dir := t.TempDir()
+
+	listener, err := Start(Config{
+		WorkingDir:       dir,
+		SessionName:      "implement-with-reviewer-1234",
+		BasenameOverride: "implement-with-reviewer-1234-implementer",
+		DefaultBasename:  "codex",
+	})
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer listener.Close()
+
+	want := filepath.Join(dir, ".implement-with-reviewer-1234-implementer.mkpipe")
+	if got := listener.Path(); got != want {
+		t.Fatalf("Path() = %q, want %q", got, want)
+	}
+}
+
 func TestSanitizeSessionBasenameFallsBackToDefault(t *testing.T) {
 	if got := sanitizeSessionBasename("///", "codex"); got != "codex" {
 		t.Fatalf("sanitizeSessionBasename fallback = %q, want %q", got, "codex")

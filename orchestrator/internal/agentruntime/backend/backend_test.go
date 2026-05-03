@@ -33,6 +33,10 @@ func (p *recordingPane) Capture() (string, error) {
 	return got, nil
 }
 
+func (p *recordingPane) Close() error {
+	return nil
+}
+
 func TestCodexDefaultsLaunchPromptAndReadyMatcher(t *testing.T) {
 	var b Backend = Codex{}
 	if got := b.DefaultSessionName(); got != "codex" {

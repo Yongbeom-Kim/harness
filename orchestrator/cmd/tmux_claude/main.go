@@ -8,7 +8,9 @@ import (
 	"os"
 	"strings"
 
-	"github.com/Yongbeom-Kim/harness/orchestrator/internal/session"
+	"github.com/Yongbeom-Kim/harness/orchestrator/internal/agentruntime"
+	runtimetmux "github.com/Yongbeom-Kim/harness/orchestrator/internal/agentruntime/tmux"
+	"github.com/Yongbeom-Kim/harness/orchestrator/internal/dirlock"
 )
 
 const (
@@ -25,19 +27,40 @@ type claudeLaunchArgs struct {
 }
 
 type claudeDeps struct {
-	newSession func(session.Config) claudeSession
+	newLock        func() (claudeLock, error)
+	newTmuxSession func(string) (claudeTmuxSession, error)
+	newRuntime     func(claudeTmuxSession, runtimetmux.TmuxPaneLike, agentruntime.Config) claudeRuntime
 }
 
-type claudeSession interface {
+type claudeLock interface {
+	Acquire() error
+	Release() error
+}
+
+type claudeTmuxSession interface {
+	Name() string
+	Attach(stdin io.Reader, stdout io.Writer, stderr io.Writer) error
+	Close() error
+	NewPane() (runtimetmux.TmuxPaneLike, error)
+}
+
+type claudeRuntime interface {
 	SessionName() string
-	Start() error
-	Attach(session.AttachOptions) error
+	Start() (agentruntime.StartInfo, error)
+	MkpipeErrors() <-chan error
+	StopMkpipe() error
 }
 
 func main() {
 	os.Exit(run(os.Args[1:], os.Stdin, os.Stdout, os.Stderr, claudeDeps{
-		newSession: func(config session.Config) claudeSession {
-			return session.NewClaude(config)
+		newLock: func() (claudeLock, error) {
+			return dirlock.NewInCurrentDirectory()
+		},
+		newTmuxSession: func(name string) (claudeTmuxSession, error) {
+			return runtimetmux.NewTmuxSession(name)
+		},
+		newRuntime: func(session claudeTmuxSession, pane runtimetmux.TmuxPaneLike, config agentruntime.Config) claudeRuntime {
+			return agentruntime.NewClaude(session, pane, config)
 		},
 	}))
 }
@@ -48,45 +71,108 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer, deps claudeDe
 		return exitCode
 	}
 
-	if deps.newSession == nil {
-		fmt.Fprintln(stderr, "claude session constructor is not configured")
+	if deps.newLock == nil {
+		fmt.Fprintln(stderr, "claude lock constructor is not configured")
 		return 1
 	}
-	config := session.Config{
-		SessionName: parsed.sessionName,
-		LockPolicy:  session.CurrentDirectoryLockPolicy(),
-	}
-	if parsed.mkpipeEnabled {
-		config.Mkpipe = &session.MkpipeConfig{Path: parsed.mkpipePath}
-	}
-	sess := deps.newSession(config)
-	if sess == nil {
-		fmt.Fprintln(stderr, "claude session constructor returned nil")
+	if deps.newTmuxSession == nil {
+		fmt.Fprintln(stderr, "claude tmux session constructor is not configured")
 		return 1
 	}
-	if parsed.attach {
-		err := sess.Attach(session.AttachOptions{
-			Stdin:  stdin,
-			Stdout: stdout,
-			Stderr: stderr,
-			BeforeAttach: func(info session.AttachInfo) {
-				if parsed.mkpipeEnabled {
-					fmt.Fprintf(stdout, "Attaching Claude tmux session %q with mkpipe %q\n", info.SessionName, info.MkpipePath)
-				}
-			},
-		})
-		if err != nil {
-			fmt.Fprintln(stderr, err.Error())
-			return 1
-		}
-		return 0
+	if deps.newRuntime == nil {
+		fmt.Fprintln(stderr, "claude runtime constructor is not configured")
+		return 1
 	}
 
-	if err := sess.Start(); err != nil {
+	lock, err := deps.newLock()
+	if err != nil {
 		fmt.Fprintln(stderr, err.Error())
 		return 1
 	}
-	fmt.Fprintf(stdout, "Launched %s in tmux session %q\n", claudeSuccessLabel, sess.SessionName())
+	if lock == nil {
+		fmt.Fprintln(stderr, "claude lock constructor returned nil")
+		return 1
+	}
+	if err := lock.Acquire(); err != nil {
+		fmt.Fprintln(stderr, err.Error())
+		return 1
+	}
+
+	tmuxSession, err := deps.newTmuxSession(parsed.sessionName)
+	if err != nil {
+		logLockCleanup(lock, stderr)
+		fmt.Fprintln(stderr, err.Error())
+		return 1
+	}
+	pane, err := tmuxSession.NewPane()
+	if err != nil {
+		cleanupBootstrapFailure(tmuxSession, lock, stderr)
+		fmt.Fprintln(stderr, err.Error())
+		return 1
+	}
+
+	config := agentruntime.Config{SessionName: parsed.sessionName}
+	if parsed.mkpipeEnabled {
+		config.Mkpipe = &agentruntime.MkpipeConfig{Path: parsed.mkpipePath}
+	}
+	rt := deps.newRuntime(tmuxSession, pane, config)
+	if rt == nil {
+		cleanupBootstrapFailure(tmuxSession, lock, stderr)
+		fmt.Fprintln(stderr, "claude runtime constructor returned nil")
+		return 1
+	}
+
+	startInfo, err := rt.Start()
+	if err != nil {
+		cleanupBootstrapFailure(tmuxSession, lock, stderr)
+		fmt.Fprintln(stderr, err.Error())
+		return 1
+	}
+
+	if !parsed.attach {
+		if err := lock.Release(); err != nil {
+			_ = tmuxSession.Close()
+			fmt.Fprintln(stderr, err.Error())
+			return 1
+		}
+		fmt.Fprintf(stdout, "Launched %s in tmux session %q\n", claudeSuccessLabel, rt.SessionName())
+		return 0
+	}
+
+	var mkpipeDone <-chan struct{}
+	if parsed.mkpipeEnabled {
+		if startInfo.Mkpipe == nil || startInfo.Mkpipe.Path == "" {
+			_ = rt.StopMkpipe()
+			cleanupBootstrapFailure(tmuxSession, lock, stderr)
+			fmt.Fprintln(stderr, "claude runtime did not expose mkpipe path")
+			return 1
+		}
+		if err := bootstrapMkpipeError(rt.MkpipeErrors()); err != nil {
+			_ = rt.StopMkpipe()
+			cleanupBootstrapFailure(tmuxSession, lock, stderr)
+			fmt.Fprintln(stderr, err.Error())
+			return 1
+		}
+		fmt.Fprintf(stdout, "Attaching Claude tmux session %q with mkpipe %q\n", rt.SessionName(), startInfo.Mkpipe.Path)
+		mkpipeDone = logMkpipeErrors(rt.MkpipeErrors(), stderr)
+	}
+
+	attachErr := tmuxSession.Attach(stdin, stdout, stderr)
+
+	if parsed.mkpipeEnabled {
+		if err := rt.StopMkpipe(); err != nil && attachErr == nil {
+			attachErr = err
+		}
+		if mkpipeDone != nil {
+			<-mkpipeDone
+		}
+	}
+	logLockCleanup(lock, stderr)
+
+	if attachErr != nil {
+		fmt.Fprintln(stderr, attachErr.Error())
+		return 1
+	}
 	return 0
 }
 
@@ -151,4 +237,57 @@ func extractMkpipeArgs(args []string) ([]string, bool, string, error) {
 	}
 
 	return cleanArgs, mkpipeEnabled, mkpipePath, nil
+}
+
+func bootstrapMkpipeError(errs <-chan error) error {
+	if errs == nil {
+		return nil
+	}
+	select {
+	case err, ok := <-errs:
+		if !ok {
+			return nil
+		}
+		return err
+	default:
+		return nil
+	}
+}
+
+func logMkpipeErrors(errs <-chan error, stderr io.Writer) <-chan struct{} {
+	done := make(chan struct{})
+	if errs == nil {
+		close(done)
+		return done
+	}
+	go func() {
+		defer close(done)
+		for err := range errs {
+			fmt.Fprintln(stderrOrDiscard(stderr), err.Error())
+		}
+	}()
+	return done
+}
+
+func cleanupBootstrapFailure(session claudeTmuxSession, lock claudeLock, stderr io.Writer) {
+	if session != nil {
+		_ = session.Close()
+	}
+	logLockCleanup(lock, stderr)
+}
+
+func logLockCleanup(lock claudeLock, stderr io.Writer) {
+	if lock == nil {
+		return
+	}
+	if err := lock.Release(); err != nil {
+		fmt.Fprintf(stderrOrDiscard(stderr), "lock cleanup failed: %v\n", err)
+	}
+}
+
+func stderrOrDiscard(stderr io.Writer) io.Writer {
+	if stderr == nil {
+		return io.Discard
+	}
+	return stderr
 }

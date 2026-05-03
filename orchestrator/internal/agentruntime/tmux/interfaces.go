@@ -13,4 +13,5 @@ type TmuxSessionLike interface {
 type TmuxPaneLike interface {
 	SendText(text string) error
 	Capture() (string, error)
+	Close() error
 }

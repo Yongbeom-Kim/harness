@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/Yongbeom-Kim/harness/orchestrator/internal/session/tmux"
+	"github.com/Yongbeom-Kim/harness/orchestrator/internal/agentruntime/tmux"
 )
 
 type LaunchCommandBuilder func(command string, args ...string) (string, error)

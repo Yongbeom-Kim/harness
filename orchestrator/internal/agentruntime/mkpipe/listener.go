@@ -12,10 +12,11 @@ import (
 )
 
 type Config struct {
-	WorkingDir      string
-	SessionName     string
-	DefaultBasename string
-	RequestedPath   string
+	WorkingDir       string
+	SessionName      string
+	BasenameOverride string
+	DefaultBasename  string
+	RequestedPath    string
 }
 
 type Listener interface {
@@ -37,7 +38,7 @@ type listener struct {
 }
 
 func Start(cfg Config) (Listener, error) {
-	path, err := resolvePath(cfg)
+	path, err := ResolvePath(cfg)
 	if err != nil {
 		return nil, err
 	}
@@ -164,7 +165,7 @@ func (l *listener) wait(ticker *time.Ticker) {
 	}
 }
 
-func resolvePath(cfg Config) (string, error) {
+func ResolvePath(cfg Config) (string, error) {
 	workingDir := cfg.WorkingDir
 	if workingDir == "" {
 		var err error
@@ -185,7 +186,11 @@ func resolvePath(cfg Config) (string, error) {
 		return filepath.Abs(filepath.Join(workingDir, cfg.RequestedPath))
 	}
 
-	basename := sanitizeSessionBasename(cfg.SessionName, cfg.DefaultBasename)
+	basenameSource := cfg.SessionName
+	if cfg.BasenameOverride != "" {
+		basenameSource = cfg.BasenameOverride
+	}
+	basename := sanitizeSessionBasename(basenameSource, cfg.DefaultBasename)
 	return filepath.Join(workingDir, "."+basename+".mkpipe"), nil
 }
 

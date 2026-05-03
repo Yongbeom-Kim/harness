@@ -7,91 +7,239 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/Yongbeom-Kim/harness/orchestrator/internal/session"
+	"github.com/Yongbeom-Kim/harness/orchestrator/internal/agentruntime"
+	runtimetmux "github.com/Yongbeom-Kim/harness/orchestrator/internal/agentruntime/tmux"
 )
 
-type fakeClaudeSession struct {
-	name       string
-	config     session.Config
-	startErr   error
-	attachErr  error
-	started    bool
-	attached   bool
-	attachOpts session.AttachOptions
+type fakeClaudeLock struct {
+	acquireCalls int
+	releaseCalls int
+	releaseErr   error
 }
 
-func (s *fakeClaudeSession) SessionName() string { return s.name }
-func (s *fakeClaudeSession) Start() error {
-	s.started = true
-	return s.startErr
+func (l *fakeClaudeLock) Acquire() error {
+	l.acquireCalls++
+	return nil
 }
-func (s *fakeClaudeSession) Attach(opts session.AttachOptions) error {
-	s.attached = true
-	s.attachOpts = opts
-	if opts.BeforeAttach != nil {
-		opts.BeforeAttach(session.AttachInfo{SessionName: s.name, MkpipePath: "/tmp/.claude-dev.mkpipe"})
+
+func (l *fakeClaudeLock) Release() error {
+	l.releaseCalls++
+	return l.releaseErr
+}
+
+type fakeClaudePane struct{}
+
+func (p *fakeClaudePane) SendText(string) error    { return nil }
+func (p *fakeClaudePane) Capture() (string, error) { return "", nil }
+func (p *fakeClaudePane) Close() error             { return nil }
+
+type fakeClaudeTmuxSession struct {
+	name        string
+	pane        runtimetmux.TmuxPaneLike
+	closed      bool
+	attachCalls int
+	attachErr   error
+	attachFn    func() error
+}
+
+func (s *fakeClaudeTmuxSession) Name() string { return s.name }
+func (s *fakeClaudeTmuxSession) Attach(io.Reader, io.Writer, io.Writer) error {
+	s.attachCalls++
+	if s.attachFn != nil {
+		return s.attachFn()
 	}
 	return s.attachErr
 }
+func (s *fakeClaudeTmuxSession) Close() error {
+	s.closed = true
+	return nil
+}
+func (s *fakeClaudeTmuxSession) NewPane() (runtimetmux.TmuxPaneLike, error) {
+	return s.pane, nil
+}
 
-func TestRunUsesDefaultClaudeSessionName(t *testing.T) {
-	fake := &fakeClaudeSession{name: "claude-main"}
+type fakeClaudeRuntime struct {
+	name            string
+	config          agentruntime.Config
+	startErr        error
+	startCalls      int
+	startMkpipePath string
+	stopMkpipeCalls int
+	mkpipeErrors    chan error
+	events          *[]string
+}
+
+func (r *fakeClaudeRuntime) SessionName() string { return r.name }
+func (r *fakeClaudeRuntime) Start() (agentruntime.StartInfo, error) {
+	r.startCalls++
+	if r.events != nil {
+		*r.events = append(*r.events, "start")
+	}
+	if r.startErr != nil {
+		return agentruntime.StartInfo{}, r.startErr
+	}
+	info := agentruntime.StartInfo{}
+	if r.config.Mkpipe != nil {
+		if r.events != nil {
+			*r.events = append(*r.events, "start_mkpipe")
+		}
+		if r.mkpipeErrors == nil {
+			r.mkpipeErrors = make(chan error, 8)
+		}
+		info.Mkpipe = &agentruntime.StartedMkpipe{Path: r.startMkpipePath}
+	}
+	return info, nil
+}
+func (r *fakeClaudeRuntime) MkpipeErrors() <-chan error { return r.mkpipeErrors }
+func (r *fakeClaudeRuntime) StopMkpipe() error {
+	r.stopMkpipeCalls++
+	if r.events != nil {
+		*r.events = append(*r.events, "stop_mkpipe")
+	}
+	if r.mkpipeErrors != nil {
+		close(r.mkpipeErrors)
+		r.mkpipeErrors = nil
+	}
+	return nil
+}
+
+func TestRunLaunchesClaudeAndPrintsBanner(t *testing.T) {
+	lock := &fakeClaudeLock{}
+	session := &fakeClaudeTmuxSession{name: "claude-dev", pane: &fakeClaudePane{}}
+	runtime := &fakeClaudeRuntime{name: "claude-dev"}
 	var stdout bytes.Buffer
-	exitCode := run(nil, nil, &stdout, io.Discard, claudeDeps{
-		newSession: func(config session.Config) claudeSession {
-			if config.SessionName != "claude" {
-				t.Fatalf("unexpected default session name: %q", config.SessionName)
+
+	exitCode := run([]string{"--session", "dev"}, nil, &stdout, io.Discard, claudeDeps{
+		newLock: func() (claudeLock, error) { return lock, nil },
+		newTmuxSession: func(name string) (claudeTmuxSession, error) {
+			if name != "dev" {
+				t.Fatalf("unexpected session name: %q", name)
 			}
-			if config.LockPolicy == nil {
-				t.Fatal("expected lock policy")
+			return session, nil
+		},
+		newRuntime: func(tmuxSession claudeTmuxSession, pane runtimetmux.TmuxPaneLike, config agentruntime.Config) claudeRuntime {
+			if config.SessionName != "dev" {
+				t.Fatalf("unexpected runtime config: %+v", config)
 			}
-			fake.config = config
-			return fake
+			runtime.config = config
+			return runtime
 		},
 	})
+
 	if exitCode != 0 {
 		t.Fatalf("unexpected exit code: %d", exitCode)
 	}
-	if !strings.Contains(stdout.String(), `Launched Claude in tmux session "claude-main"`) {
-		t.Fatalf("unexpected stdout: %q", stdout.String())
+	if runtime.startCalls != 1 || session.attachCalls != 0 {
+		t.Fatalf("startCalls=%d attachCalls=%d", runtime.startCalls, session.attachCalls)
+	}
+	if lock.acquireCalls != 1 || lock.releaseCalls != 1 {
+		t.Fatalf("acquire=%d release=%d", lock.acquireCalls, lock.releaseCalls)
+	}
+	if got := stdout.String(); !strings.Contains(got, `Launched Claude in tmux session "claude-dev"`) {
+		t.Fatalf("unexpected stdout: %q", got)
 	}
 }
 
-func TestRunAttachesClaudeSession(t *testing.T) {
-	fake := &fakeClaudeSession{name: "claude-dev"}
-	exitCode := run([]string{"--attach"}, nil, io.Discard, io.Discard, claudeDeps{
-		newSession: func(config session.Config) claudeSession { return fake },
+func TestRunClaudeAttachMkpipeStartsRuntimeAfterStartAndStopsItAfterAttach(t *testing.T) {
+	lock := &fakeClaudeLock{}
+	events := []string{}
+	runtime := &fakeClaudeRuntime{
+		name:            "claude-dev",
+		startMkpipePath: "/tmp/.claude-dev.mkpipe",
+		events:          &events,
+	}
+	session := &fakeClaudeTmuxSession{
+		name: "claude-dev",
+		pane: &fakeClaudePane{},
+		attachFn: func() error {
+			events = append(events, "attach")
+			return nil
+		},
+	}
+	var stdout bytes.Buffer
+
+	exitCode := run([]string{"--attach", "--mkpipe", "./custom.pipe"}, nil, &stdout, io.Discard, claudeDeps{
+		newLock:        func() (claudeLock, error) { return lock, nil },
+		newTmuxSession: func(string) (claudeTmuxSession, error) { return session, nil },
+		newRuntime: func(tmuxSession claudeTmuxSession, pane runtimetmux.TmuxPaneLike, config agentruntime.Config) claudeRuntime {
+			if config.Mkpipe == nil || config.Mkpipe.Path != "./custom.pipe" {
+				t.Fatalf("unexpected mkpipe config: %+v", config.Mkpipe)
+			}
+			runtime.config = config
+			return runtime
+		},
 	})
+
 	if exitCode != 0 {
 		t.Fatalf("unexpected exit code: %d", exitCode)
 	}
-	if fake.started || !fake.attached {
-		t.Fatalf("expected attach only, got started=%v attached=%v", fake.started, fake.attached)
+	if runtime.stopMkpipeCalls != 1 || lock.releaseCalls != 1 {
+		t.Fatalf("stopMkpipeCalls=%d releaseCalls=%d", runtime.stopMkpipeCalls, lock.releaseCalls)
+	}
+	if got, want := stdout.String(), "Attaching Claude tmux session \"claude-dev\" with mkpipe \"/tmp/.claude-dev.mkpipe\"\n"; got != want {
+		t.Fatalf("stdout = %q, want %q", got, want)
+	}
+	if want := []string{"start", "start_mkpipe", "attach", "stop_mkpipe"}; strings.Join(events, ",") != strings.Join(want, ",") {
+		t.Fatalf("events = %v, want %v", events, want)
+	}
+}
+
+func TestRunClaudeAttachLogsRuntimeMkpipeErrorsAfterAttachBegins(t *testing.T) {
+	lock := &fakeClaudeLock{}
+	runtime := &fakeClaudeRuntime{
+		name:            "claude-dev",
+		startMkpipePath: "/tmp/.claude-dev.mkpipe",
+		mkpipeErrors:    make(chan error, 8),
+	}
+	session := &fakeClaudeTmuxSession{
+		name: "claude-dev",
+		pane: &fakeClaudePane{},
+		attachFn: func() error {
+			runtime.mkpipeErrors <- errors.New("mkpipe delivery failed")
+			return nil
+		},
+	}
+	var stderr bytes.Buffer
+
+	exitCode := run([]string{"--attach", "--mkpipe"}, nil, io.Discard, &stderr, claudeDeps{
+		newLock:        func() (claudeLock, error) { return lock, nil },
+		newTmuxSession: func(string) (claudeTmuxSession, error) { return session, nil },
+		newRuntime: func(_ claudeTmuxSession, _ runtimetmux.TmuxPaneLike, config agentruntime.Config) claudeRuntime {
+			runtime.config = config
+			return runtime
+		},
+	})
+
+	if exitCode != 0 {
+		t.Fatalf("unexpected exit code: %d", exitCode)
+	}
+	if !strings.Contains(stderr.String(), "mkpipe delivery failed") {
+		t.Fatalf("stderr = %q, want logged mkpipe failure", stderr.String())
 	}
 }
 
 func TestRunReturnsClaudeStartFailure(t *testing.T) {
-	fake := &fakeClaudeSession{name: "claude", startErr: errors.New("not ready")}
+	lock := &fakeClaudeLock{}
+	session := &fakeClaudeTmuxSession{name: "claude", pane: &fakeClaudePane{}}
+	runtime := &fakeClaudeRuntime{name: "claude", startErr: errors.New("not ready")}
 	var stderr bytes.Buffer
+
 	exitCode := run(nil, nil, io.Discard, &stderr, claudeDeps{
-		newSession: func(config session.Config) claudeSession { return fake },
+		newLock:        func() (claudeLock, error) { return lock, nil },
+		newTmuxSession: func(string) (claudeTmuxSession, error) { return session, nil },
+		newRuntime: func(claudeTmuxSession, runtimetmux.TmuxPaneLike, agentruntime.Config) claudeRuntime {
+			return runtime
+		},
 	})
+
 	if exitCode != 1 {
 		t.Fatalf("expected exit 1, got %d", exitCode)
 	}
+	if !session.closed || lock.releaseCalls != 1 {
+		t.Fatalf("session.closed=%v lock.releaseCalls=%d", session.closed, lock.releaseCalls)
+	}
 	if !strings.Contains(stderr.String(), "not ready") {
 		t.Fatalf("stderr missing start error: %q", stderr.String())
-	}
-}
-
-func TestRunRejectsBlankClaudeSession(t *testing.T) {
-	var stderr bytes.Buffer
-	exitCode := run([]string{"--session", "  "}, nil, io.Discard, &stderr, claudeDeps{})
-	if exitCode != 2 {
-		t.Fatalf("expected exit 2, got %d", exitCode)
-	}
-	if !strings.Contains(stderr.String(), "invalid --session") {
-		t.Fatalf("stderr missing validation error: %q", stderr.String())
 	}
 }
 
@@ -142,34 +290,24 @@ func TestParseArgsRejectsClaudeMkpipeUsageErrors(t *testing.T) {
 	}
 }
 
-func TestRunClaudeMkpipePassesConfigAndPrintsStatusFromHook(t *testing.T) {
-	fake := &fakeClaudeSession{name: "claude-dev"}
-	var stdout bytes.Buffer
-	exitCode := run([]string{"--attach", "--mkpipe", "./custom.pipe"}, nil, &stdout, io.Discard, claudeDeps{
-		newSession: func(config session.Config) claudeSession {
-			if config.Mkpipe == nil || config.Mkpipe.Path != "./custom.pipe" {
-				t.Fatalf("unexpected mkpipe config: %+v", config.Mkpipe)
-			}
-			return fake
+func TestRunClaudeAttachFailureReturnsError(t *testing.T) {
+	lock := &fakeClaudeLock{}
+	session := &fakeClaudeTmuxSession{name: "claude-dev", pane: &fakeClaudePane{}, attachErr: errors.New("attach failed")}
+	runtime := &fakeClaudeRuntime{name: "claude-dev"}
+	var stderr bytes.Buffer
+
+	exitCode := run([]string{"--attach"}, nil, io.Discard, &stderr, claudeDeps{
+		newLock:        func() (claudeLock, error) { return lock, nil },
+		newTmuxSession: func(string) (claudeTmuxSession, error) { return session, nil },
+		newRuntime: func(claudeTmuxSession, runtimetmux.TmuxPaneLike, agentruntime.Config) claudeRuntime {
+			return runtime
 		},
 	})
 
-	if exitCode != 0 || !fake.attached {
-		t.Fatalf("exit=%d attached=%v", exitCode, fake.attached)
-	}
-	want := "Attaching Claude tmux session \"claude-dev\" with mkpipe \"/tmp/.claude-dev.mkpipe\"\n"
-	if got := stdout.String(); got != want {
-		t.Fatalf("stdout = %q, want %q", got, want)
-	}
-}
-
-func TestRunClaudeAttachFailureReturnsError(t *testing.T) {
-	fake := &fakeClaudeSession{name: "claude-dev", attachErr: errors.New("attach failed")}
-	var stderr bytes.Buffer
-	exitCode := run([]string{"--attach"}, nil, io.Discard, &stderr, claudeDeps{
-		newSession: func(config session.Config) claudeSession { return fake },
-	})
 	if exitCode != 1 || !strings.Contains(stderr.String(), "attach failed") {
 		t.Fatalf("exit=%d stderr=%q", exitCode, stderr.String())
+	}
+	if lock.releaseCalls != 1 {
+		t.Fatalf("lock.releaseCalls = %d, want 1", lock.releaseCalls)
 	}
 }

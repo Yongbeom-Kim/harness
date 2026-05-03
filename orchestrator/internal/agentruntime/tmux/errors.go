@@ -119,6 +119,17 @@ func (e *CapturePaneError) Error() string {
 
 func (e *CapturePaneError) Unwrap() error { return e.Err }
 
+type KillPaneError struct {
+	Target string
+	Err    error
+}
+
+func (e *KillPaneError) Error() string {
+	return tmuxCommandErrorMessage("kill-pane", fmt.Sprintf("for target %q", e.Target), e.Err)
+}
+
+func (e *KillPaneError) Unwrap() error { return e.Err }
+
 func tmuxCommandErrorMessage(command string, detail string, err error) string {
 	if detail == "" {
 		return fmt.Sprintf("tmux %s failed: %v", command, err)

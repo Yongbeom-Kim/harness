@@ -7,8 +7,9 @@ The supported operator-facing harness binaries are exactly:
 - `tmux_codex`
 - `tmux_claude`
 - `tmux_cursor`
+- `implement-with-reviewer`
 
-This file documents the `tmux_cursor` member of that launcher-only surface and the shared launch-environment behavior used by all three launchers.
+This file documents the `tmux_cursor` member of the single-agent launcher surface and the shared launch-environment behavior used by all three launchers.
 
 ## Purpose
 
