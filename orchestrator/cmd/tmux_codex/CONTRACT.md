@@ -6,8 +6,9 @@ The supported operator-facing harness binaries are exactly:
 
 - `tmux_codex`
 - `tmux_claude`
+- `tmux_cursor`
 
-This file documents the `tmux_codex` member of that launcher-only surface and the shared launch-environment behavior used by both launchers. No workflow binary or historical run artifact contract remains part of the active product surface.
+This file documents the `tmux_codex` member of that launcher-only surface and the shared launch-environment behavior used by all three launchers. No workflow binary or historical run artifact contract remains part of the active product surface.
 
 ## Purpose
 
@@ -80,7 +81,7 @@ It then requests the session's first pane and sends a sourced launcher command e
 bash -lc 'if [ -f "$HOME/.agentrc" ]; then . "$HOME/.agentrc"; fi; export PATH='"'"'/Users/example/.agent-bin'"'"':"$PATH"; stty -echo; '"'"'codex'"'"''
 ```
 
-The shared launcher contract for `tmux_codex` and `tmux_claude` is:
+The shared launcher contract for `tmux_codex`, `tmux_claude`, and `tmux_cursor` is:
 
 - source `$HOME/.agentrc` if present
 - prepend `~/.agent-bin` to `PATH`
@@ -95,7 +96,7 @@ The emitted `PATH` entry uses the resolved absolute path for `~/.agent-bin`; it 
 
 `~/.agent-bin` remains operator-owned. `make setup` fails with clear guidance if that path already exists as a non-symlink file or directory, and launcher runtime does not require the directory to point back to this repo.
 
-The launcher CLI surface remains launcher-only for both supported binaries. There are no PATH-injection flags or positional arguments.
+The launcher CLI surface remains launcher-only for all three supported binaries. There are no PATH-injection flags or positional arguments.
 
 ### Attach behavior
 

@@ -1,4 +1,4 @@
-package agent
+package session
 
 import (
 	"errors"
@@ -10,20 +10,22 @@ const (
 	ErrorKindStartup = "startup"
 	ErrorKindCapture = "capture"
 	ErrorKindClose   = "close"
+	ErrorKindState   = "state"
+	ErrorKindAttach  = "attach"
 )
 
-type AgentError struct {
+type Error struct {
 	Kind        string
 	SessionName string
 	Capture     string
 	Err         error
 }
 
-func NewAgentError(kind string, sessionName string, capture string, err error) error {
+func newError(kind string, sessionName string, capture string, err error) error {
 	if err == nil {
-		err = errors.New("agent error")
+		err = errors.New("session error")
 	}
-	return &AgentError{
+	return &Error{
 		Kind:        kind,
 		SessionName: sessionName,
 		Capture:     capture,
@@ -31,19 +33,19 @@ func NewAgentError(kind string, sessionName string, capture string, err error) e
 	}
 }
 
-func (e *AgentError) Error() string {
+func (e *Error) Error() string {
 	switch {
 	case e.SessionName == "" && e.Kind == "":
 		return e.Err.Error()
 	case e.SessionName == "":
-		return fmt.Sprintf("%s agent error: %v", e.Kind, e.Err)
+		return fmt.Sprintf("%s session error: %v", e.Kind, e.Err)
 	case e.Kind == "":
-		return fmt.Sprintf("agent session %s error: %v", e.SessionName, e.Err)
+		return fmt.Sprintf("session %s error: %v", e.SessionName, e.Err)
 	default:
-		return fmt.Sprintf("%s agent session %s error: %v", e.Kind, e.SessionName, e.Err)
+		return fmt.Sprintf("%s session %s error: %v", e.Kind, e.SessionName, e.Err)
 	}
 }
 
-func (e *AgentError) Unwrap() error {
+func (e *Error) Unwrap() error {
 	return e.Err
 }

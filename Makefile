@@ -17,6 +17,7 @@ build:
 	rm -f "$(ROOT)/bin"/*
 	cd orchestrator && go build -o ../bin/tmux_codex ./cmd/tmux_codex
 	cd orchestrator && go build -o ../bin/tmux_claude ./cmd/tmux_claude
+	cd orchestrator && go build -o ../bin/tmux_cursor ./cmd/tmux_cursor
 	@rmdir "$(ROOT)/orchestrator/cmd/tmux_agent" 2>/dev/null || true
 
 clean:

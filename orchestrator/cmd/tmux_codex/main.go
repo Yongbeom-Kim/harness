@@ -1,21 +1,14 @@
 package main
 
 import (
-	"context"
 	"errors"
 	"flag"
 	"fmt"
 	"io"
 	"os"
-	"os/signal"
 	"strings"
-	"sync"
-	"syscall"
 
-	agentpkg "github.com/Yongbeom-Kim/harness/orchestrator/internal/agent"
-	"github.com/Yongbeom-Kim/harness/orchestrator/internal/agent/tmux"
-	"github.com/Yongbeom-Kim/harness/orchestrator/internal/dirlock"
-	"github.com/Yongbeom-Kim/harness/orchestrator/internal/mkpipe"
+	"github.com/Yongbeom-Kim/harness/orchestrator/internal/session"
 )
 
 const (
@@ -32,25 +25,20 @@ type codexLaunchArgs struct {
 }
 
 type codexDeps struct {
-	newAgent      func(string) agentpkg.Agent
-	newLock       func() (dirlock.Locker, error)
-	openSession   func(string) (tmux.TmuxSessionLike, error)
-	startMkpipe   func(mkpipe.Config) (mkpipe.Listener, error)
-	signalContext func() (context.Context, context.CancelFunc)
+	newSession func(session.Config) codexSession
+}
+
+type codexSession interface {
+	SessionName() string
+	Start() error
+	Attach(session.AttachOptions) error
 }
 
 func main() {
 	os.Exit(run(os.Args[1:], os.Stdin, os.Stdout, os.Stderr, codexDeps{
-		newAgent: func(sessionName string) agentpkg.Agent {
-			return agentpkg.NewCodexAgent(sessionName)
+		newSession: func(config session.Config) codexSession {
+			return session.NewCodex(config)
 		},
-		newLock: func() (dirlock.Locker, error) {
-			return dirlock.NewInCurrentDirectory()
-		},
-		openSession: func(sessionName string) (tmux.TmuxSessionLike, error) {
-			return tmux.OpenTmuxSession(sessionName)
-		},
-		startMkpipe: mkpipe.Start,
 	}))
 }
 
@@ -60,126 +48,45 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer, deps codexDep
 		return exitCode
 	}
 
-	if deps.newLock == nil {
-		fmt.Fprintln(stderr, "codex lock constructor is not configured")
+	if deps.newSession == nil {
+		fmt.Fprintln(stderr, "codex session constructor is not configured")
 		return 1
 	}
-	lock, err := deps.newLock()
-	if err != nil {
-		fmt.Fprintln(stderr, err.Error())
+	config := session.Config{
+		SessionName: parsed.sessionName,
+		LockPolicy:  session.CurrentDirectoryLockPolicy(),
+	}
+	if parsed.mkpipeEnabled {
+		config.Mkpipe = &session.MkpipeConfig{Path: parsed.mkpipePath}
+	}
+	sess := deps.newSession(config)
+	if sess == nil {
+		fmt.Fprintln(stderr, "codex session constructor returned nil")
 		return 1
 	}
-	if err := lock.Acquire(); err != nil {
-		fmt.Fprintln(stderr, err.Error())
-		return 1
-	}
-	defer lock.Release()
-
-	if deps.newAgent == nil {
-		fmt.Fprintln(stderr, "codex agent constructor is not configured")
-		return 1
-	}
-	agent := deps.newAgent(parsed.sessionName)
-	if agent == nil {
-		fmt.Fprintln(stderr, "codex agent constructor returned nil")
-		return 1
-	}
-	if err := agent.Start(); err != nil {
-		fmt.Fprintln(stderr, err.Error())
-		return 1
-	}
-	if err := agent.WaitUntilReady(); err != nil {
-		_ = agent.Close()
-		fmt.Fprintln(stderr, err.Error())
-		return 1
-	}
-
 	if parsed.attach {
-		var listener mkpipe.Listener
-		cleanup := func() {}
-		if parsed.mkpipeEnabled {
-			if deps.startMkpipe == nil {
-				_ = agent.Close()
-				fmt.Fprintln(stderr, "codex mkpipe starter is not configured")
-				return 1
-			}
-			var err error
-			listener, err = deps.startMkpipe(mkpipe.Config{
-				SessionName:     agent.SessionName(),
-				DefaultBasename: codexDefaultSessionName,
-				RequestedPath:   parsed.mkpipePath,
-			})
-			if err != nil {
-				_ = agent.Close()
-				fmt.Fprintln(stderr, err.Error())
-				return 1
-			}
-
-			signalContext := deps.signalContext
-			if signalContext == nil {
-				signalContext = func() (context.Context, context.CancelFunc) {
-					return signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+		err := sess.Attach(session.AttachOptions{
+			Stdin:  stdin,
+			Stdout: stdout,
+			Stderr: stderr,
+			BeforeAttach: func(info session.AttachInfo) {
+				if parsed.mkpipeEnabled {
+					fmt.Fprintf(stdout, "Attaching Codex tmux session %q with mkpipe %q\n", info.SessionName, info.MkpipePath)
 				}
-			}
-			ctx, stop := signalContext()
-			defer stop()
-
-			var cleanupOnce sync.Once
-			cleanup = func() {
-				cleanupOnce.Do(func() {
-					if err := listener.Close(); err != nil {
-						fmt.Fprintf(stderr, "mkpipe cleanup failed: %v\n", err)
-					}
-				})
-			}
-			go func() {
-				<-ctx.Done()
-				cleanup()
-			}()
-			go func() {
-				for prompt := range listener.Messages() {
-					if err := agent.SendPrompt(prompt); err != nil {
-						fmt.Fprintf(stderr, "mkpipe delivery failed: %v\n", err)
-					}
-				}
-			}()
-			go func() {
-				for err := range listener.Errors() {
-					fmt.Fprintf(stderr, "mkpipe listener error: %v\n", err)
-				}
-			}()
-		}
-
-		if deps.openSession == nil {
-			cleanup()
-			if parsed.mkpipeEnabled {
-				_ = agent.Close()
-			}
-			fmt.Fprintln(stderr, "codex session opener is not configured")
-			return 1
-		}
-		session, err := deps.openSession(agent.SessionName())
+			},
+		})
 		if err != nil {
-			cleanup()
-			if parsed.mkpipeEnabled {
-				_ = agent.Close()
-			}
 			fmt.Fprintln(stderr, err.Error())
 			return 1
 		}
-		if parsed.mkpipeEnabled {
-			fmt.Fprintf(stdout, "Attaching Codex tmux session %q with mkpipe %q\n", agent.SessionName(), listener.Path())
-		}
-		if err := session.Attach(stdin, stdout, stderr); err != nil {
-			cleanup()
-			fmt.Fprintln(stderr, err.Error())
-			return 1
-		}
-		cleanup()
 		return 0
 	}
 
-	fmt.Fprintf(stdout, "Launched %s in tmux session %q\n", codexSuccessLabel, agent.SessionName())
+	if err := sess.Start(); err != nil {
+		fmt.Fprintln(stderr, err.Error())
+		return 1
+	}
+	fmt.Fprintf(stdout, "Launched %s in tmux session %q\n", codexSuccessLabel, sess.SessionName())
 	return 0
 }
 
