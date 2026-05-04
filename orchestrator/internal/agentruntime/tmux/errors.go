@@ -1,6 +1,9 @@
 package tmux
 
-import "fmt"
+import (
+	"fmt"
+	"time"
+)
 
 type TmuxSessionAbsentError struct {
 	Message string
@@ -71,6 +74,30 @@ func (e *SplitWindowError) Error() string {
 
 func (e *SplitWindowError) Unwrap() error { return e.Err }
 
+type LoadBufferError struct {
+	BufferName string
+	Err        error
+}
+
+func (e *LoadBufferError) Error() string {
+	return tmuxCommandErrorMessage("load-buffer", fmt.Sprintf("for buffer %q", e.BufferName), e.Err)
+}
+
+func (e *LoadBufferError) Unwrap() error { return e.Err }
+
+type PasteBufferError struct {
+	Target     string
+	BufferName string
+	Err        error
+}
+
+func (e *PasteBufferError) Error() string {
+	detail := fmt.Sprintf("for buffer %q to target %q", e.BufferName, e.Target)
+	return tmuxCommandErrorMessage("paste-buffer", detail, e.Err)
+}
+
+func (e *PasteBufferError) Unwrap() error { return e.Err }
+
 type SendKeysError struct {
 	Target string
 	Keys   []string
@@ -105,6 +132,40 @@ func (e *KillPaneError) Error() string {
 }
 
 func (e *KillPaneError) Unwrap() error { return e.Err }
+
+type NonInteractivePaneError struct {
+	Target    string
+	Operation string
+	State     paneStateSnapshot
+	Attempts  int
+}
+
+func (e *NonInteractivePaneError) Error() string {
+	return fmt.Sprintf(
+		"tmux pane %q remained non-interactive during %s after %d attempt(s): %s",
+		e.Target,
+		e.Operation,
+		e.Attempts,
+		e.State,
+	)
+}
+
+type DeliveryVerificationError struct {
+	Target    string
+	Operation string
+	State     paneStateSnapshot
+	Timeout   time.Duration
+}
+
+func (e *DeliveryVerificationError) Error() string {
+	return fmt.Sprintf(
+		"tmux delivery verification failed for target %q during %s after %s: %s",
+		e.Target,
+		e.Operation,
+		e.Timeout,
+		e.State,
+	)
+}
 
 func tmuxCommandErrorMessage(command string, detail string, err error) string {
 	if detail == "" {

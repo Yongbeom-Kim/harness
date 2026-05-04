@@ -266,6 +266,116 @@ func TestRunFailsIfRuntimeMkpipeReportsDeliveryErrorBeforeAttach(t *testing.T) {
 	}
 }
 
+func TestRunFailsIfImplementerRuntimeDoesNotExposeMkpipePath(t *testing.T) {
+	now := time.Date(2026, time.May, 3, 12, 34, 56, 0, time.UTC)
+	lock := &fakeWorkflowLock{}
+	session := &fakeWorkflowSession{
+		name:  generateSessionName(now),
+		panes: []runtimetmux.TmuxPaneLike{&fakeWorkflowPane{}, &fakeWorkflowPane{}},
+	}
+	implementer := &fakeWorkflowRuntime{
+		name:            session.name,
+		startMkpipePath: "",
+		eventPrefix:     "implementer",
+	}
+	reviewer := &fakeWorkflowRuntime{
+		name:            session.name,
+		startMkpipePath: "/abs/reviewer.pipe",
+		eventPrefix:     "reviewer",
+	}
+	var stderr bytes.Buffer
+
+	exitCode := run([]string{"--implementer", "codex", "--reviewer", "claude", "ship it"}, nil, io.Discard, &stderr, workflowDeps{
+		now:            func() time.Time { return now },
+		newLock:        func() (workflowLock, error) { return lock, nil },
+		newTmuxSession: func(string) (workflowTmuxSession, error) { return session, nil },
+		newRuntime: func(name backendName, tmuxSession workflowTmuxSession, pane runtimetmux.TmuxPaneLike, config agentruntime.Config) workflowRuntime {
+			switch name {
+			case backendCodex:
+				implementer.config = config
+				return implementer
+			case backendClaude:
+				reviewer.config = config
+				return reviewer
+			default:
+				t.Fatalf("unexpected backend: %q", name)
+				return nil
+			}
+		},
+	})
+
+	if exitCode != 1 {
+		t.Fatalf("expected exit 1, got %d", exitCode)
+	}
+	if !session.closed || lock.releaseCalls != 1 {
+		t.Fatalf("session.closed=%v lock.releaseCalls=%d", session.closed, lock.releaseCalls)
+	}
+	if implementer.stopMkpipe != 1 || reviewer.stopMkpipe != 1 {
+		t.Fatalf("implementer.stop=%d reviewer.stop=%d", implementer.stopMkpipe, reviewer.stopMkpipe)
+	}
+	if len(implementer.prompts) != 0 || len(reviewer.prompts) != 0 {
+		t.Fatalf("prompts should not be sent on mkpipe path failure: implementer=%v reviewer=%v", implementer.prompts, reviewer.prompts)
+	}
+	if !strings.Contains(stderr.String(), "implementer runtime did not expose mkpipe path") {
+		t.Fatalf("stderr = %q, want missing implementer mkpipe path error", stderr.String())
+	}
+}
+
+func TestRunFailsIfReviewerRuntimeDoesNotExposeMkpipePath(t *testing.T) {
+	now := time.Date(2026, time.May, 3, 12, 34, 56, 0, time.UTC)
+	lock := &fakeWorkflowLock{}
+	session := &fakeWorkflowSession{
+		name:  generateSessionName(now),
+		panes: []runtimetmux.TmuxPaneLike{&fakeWorkflowPane{}, &fakeWorkflowPane{}},
+	}
+	implementer := &fakeWorkflowRuntime{
+		name:            session.name,
+		startMkpipePath: "/abs/implementer.pipe",
+		eventPrefix:     "implementer",
+	}
+	reviewer := &fakeWorkflowRuntime{
+		name:            session.name,
+		startMkpipePath: "",
+		eventPrefix:     "reviewer",
+	}
+	var stderr bytes.Buffer
+
+	exitCode := run([]string{"--implementer", "codex", "--reviewer", "claude", "ship it"}, nil, io.Discard, &stderr, workflowDeps{
+		now:            func() time.Time { return now },
+		newLock:        func() (workflowLock, error) { return lock, nil },
+		newTmuxSession: func(string) (workflowTmuxSession, error) { return session, nil },
+		newRuntime: func(name backendName, tmuxSession workflowTmuxSession, pane runtimetmux.TmuxPaneLike, config agentruntime.Config) workflowRuntime {
+			switch name {
+			case backendCodex:
+				implementer.config = config
+				return implementer
+			case backendClaude:
+				reviewer.config = config
+				return reviewer
+			default:
+				t.Fatalf("unexpected backend: %q", name)
+				return nil
+			}
+		},
+	})
+
+	if exitCode != 1 {
+		t.Fatalf("expected exit 1, got %d", exitCode)
+	}
+	if !session.closed || lock.releaseCalls != 1 {
+		t.Fatalf("session.closed=%v lock.releaseCalls=%d", session.closed, lock.releaseCalls)
+	}
+	if implementer.stopMkpipe != 1 || reviewer.stopMkpipe != 1 {
+		t.Fatalf("implementer.stop=%d reviewer.stop=%d", implementer.stopMkpipe, reviewer.stopMkpipe)
+	}
+	if len(implementer.prompts) != 0 || len(reviewer.prompts) != 0 {
+		t.Fatalf("prompts should not be sent on mkpipe path failure: implementer=%v reviewer=%v", implementer.prompts, reviewer.prompts)
+	}
+	if !strings.Contains(stderr.String(), "reviewer runtime did not expose mkpipe path") {
+		t.Fatalf("stderr = %q, want missing reviewer mkpipe path error", stderr.String())
+	}
+}
+
 func TestParseArgsValidation(t *testing.T) {
 	tests := []struct {
 		name          string
@@ -296,5 +406,28 @@ func TestParseArgsHelpReturnsSuccess(t *testing.T) {
 	_, exitCode, ok := parseArgs([]string{"-h"}, io.Discard)
 	if ok || exitCode != 0 {
 		t.Fatalf("ok=%v exitCode=%d, want ok=false exitCode=0", ok, exitCode)
+	}
+}
+
+func TestParseBackendNormalizesCaseAndWhitespace(t *testing.T) {
+	tests := []struct {
+		raw  string
+		want backendName
+	}{
+		{raw: " Codex ", want: backendCodex},
+		{raw: "\tclaude\n", want: backendClaude},
+		{raw: "CURSOR", want: backendCursor},
+	}
+
+	for _, tt := range tests {
+		t.Run(strings.TrimSpace(strings.ToLower(tt.raw)), func(t *testing.T) {
+			got, err := parseBackend(tt.raw)
+			if err != nil {
+				t.Fatalf("parseBackend(%q) returned error: %v", tt.raw, err)
+			}
+			if got != tt.want {
+				t.Fatalf("parseBackend(%q) = %q, want %q", tt.raw, got, tt.want)
+			}
+		})
 	}
 }

@@ -63,3 +63,9 @@ func TestGenerateSessionNameUsesWorkflowPrefixAndTmuxSafeSuffix(t *testing.T) {
 		t.Fatalf("session name must be tmux-safe: %q", name)
 	}
 }
+
+func TestSanitizeSessionSuffixCollapsesInvalidRunsAndTrimsEdges(t *testing.T) {
+	if got, want := sanitizeSessionSuffix(" /alpha::beta\tgamma/ "), "alpha-beta-gamma"; got != want {
+		t.Fatalf("sanitizeSessionSuffix returned %q, want %q", got, want)
+	}
+}

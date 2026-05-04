@@ -300,6 +300,54 @@ func assertRuntimeNotStartedError(t *testing.T, err error, sessionName string) {
 	}
 }
 
+func TestRuntimeSendPromptWrapsTypedTmuxSendFailures(t *testing.T) {
+	tmuxErr := &tmux.NonInteractivePaneError{
+		Target:    "%7",
+		Operation: "send text",
+		Attempts:  5,
+	}
+	pane := &fakePane{sendErr: tmuxErr}
+	rt := newRuntime(
+		fakeBackend{
+			defaultSessionName: "codex",
+			sendPromptNowFn: func(pane tmux.TmuxPaneLike, prompt string) error {
+				if err := pane.SendText(prompt); err != nil {
+					return err
+				}
+				return pane.PressKey("Enter")
+			},
+		},
+		nil,
+		pane,
+		Config{SessionName: "dev"},
+	)
+	rt.state = stateStarted
+
+	err := rt.SendPromptNow("hello")
+	if err == nil {
+		t.Fatal("SendPromptNow() error = nil, want wrapped tmux error")
+	}
+
+	var runtimeErr *Error
+	if !errors.As(err, &runtimeErr) {
+		t.Fatalf("error = %#v, want *Error", err)
+	}
+	if runtimeErr.Kind != ErrorKindCapture || runtimeErr.SessionName != "dev" {
+		t.Fatalf("runtime error = %#v, want capture error for dev", runtimeErr)
+	}
+	if runtimeErr.Capture != "" {
+		t.Fatalf("Capture = %q, want empty capture", runtimeErr.Capture)
+	}
+
+	var wrappedTmuxErr *tmux.NonInteractivePaneError
+	if !errors.As(runtimeErr.Err, &wrappedTmuxErr) {
+		t.Fatalf("wrapped error = %#v, want *tmux.NonInteractivePaneError", runtimeErr.Err)
+	}
+	if wrappedTmuxErr != tmuxErr {
+		t.Fatalf("wrapped error = %#v, want original tmux error %#v", wrappedTmuxErr, tmuxErr)
+	}
+}
+
 func TestRuntimeMkpipeForwardersUseQueuedSemanticsWithoutLocalBuffering(t *testing.T) {
 	now := time.Unix(0, 0)
 	pane := &fakePane{captures: []string{"OpenAI Codex\n› ", "OpenAI Codex\n› "}}
